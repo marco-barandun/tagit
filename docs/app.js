@@ -1,0 +1,1739 @@
+// =============================================================================
+// app.js — tagit in the browser
+//
+// A zero-install, browser-only version of tagit.R. Point it at a local folder
+// of JPEGs (or drag some in), pick a taxon, and it writes the caption into the
+// photo's metadata and organises the file into status subfolders — all on the
+// user's own machine. Nothing is uploaded.
+//
+// Full folder read/write needs the File System Access API (Chrome/Edge/Brave/
+// Arc). In other browsers it falls back to "drag in → tag → download a copy".
+// =============================================================================
+
+(() => {
+  "use strict";
+
+  // ---- config (mirrors tagit.R) -------------------------------------------
+  const CFG = {
+    suggestionWindowMin: 5,
+    cameraClockOffsetHours: 0,
+    maxSuggestions: 10,
+    maxRecent: 6,
+    labelledDir: "_labelled",
+    skippedDir: "_skipped",
+    undeterminedDir: "_undetermined",
+    deletedDir: "_deleted",
+    undeterminedCaption: "Indet.",
+  };
+  const IMAGE_RE = /\.(jpe?g)$/i;                 // browser build handles JPEG only
+  const STATUS_DIRS = {
+    labelled: CFG.labelledDir, skipped: CFG.skippedDir,
+    undetermined: CFG.undeterminedDir, deleted: CFG.deletedDir,
+  };
+  const SUBDIR_NAMES = Object.values(STATUS_DIRS);
+
+  // ---- state ---------------------------------------------------------------
+  const S = {
+    mode: null,            // "fs" (File System Access) or "download"
+    rootHandle: null,      // DirectoryHandle in fs mode
+    subHandles: {},        // cached status subfolder handles
+    photos: [],            // [{name,status,fileHandle,parentHandle,file,datetime,lat,lon,caption,orientation,url}]
+    idx: 0,
+    selected: [],          // chosen taxa (chips)
+    cf: false,
+    recent: [],
+    lastCaption: "",
+    undo: null,
+    backbone: new Map(),   // taxon -> family (merged from active taxonomies)
+    taxAttrs: new Map(),   // taxon -> { attrColumn: value }
+    choices: [],           // sorted taxon names for the search box
+    taxonomies: [],        // registry: [{id, name, source, file?}]
+    activeTaxonomies: new Set(),   // ids of taxonomies in use (several at once)
+    taxonomyCache: new Map(),      // id -> records[] {taxon, family, attrs}
+    obs: [],               // [{species, datetime:Date, locality}]
+    sessionFamilies: new Map(),
+    statusFilter: new Set(["untouched"]),
+    metaToken: 0,          // invalidates in-flight background metadata reads on reload
+    inatToken: "",         // iNaturalist API token (browser-only)
+    inatResults: [],       // last CV suggestions
+    inatResultsFor: null,  // photo the CV suggestions belong to
+    mapVisible: false,     // map toggle (persisted)
+    infoVisible: true,     // photo-info panel (map/date/time/caption/keywords) toggle
+    watermark: { enabled: false, text: "", position: "br", font: "sans", sizePct: 2.8 },  // optional burned-in watermark
+  };
+
+  // ---- tiny DOM helpers ----------------------------------------------------
+  const $ = (id) => document.getElementById(id);
+  const el = (tag, props = {}, kids = []) => {
+    const n = document.createElement(tag);
+    Object.assign(n, props);
+    if (props.style) n.setAttribute("style", props.style);
+    for (const k of [].concat(kids)) n.append(k);
+    return n;
+  };
+  const toast = (msg, kind = "info", ms = 3500) => {
+    const t = el("div", { className: `toast ${kind}`, textContent: msg });
+    $("toasts").append(t);
+    setTimeout(() => t.remove(), ms);
+  };
+
+  // ---- persistence: settings, recent, backbone/obs, folder handle ----------
+  const LS = {
+    get(k, d) { try { return JSON.parse(localStorage.getItem("tagit." + k)) ?? d; } catch { return d; } },
+    set(k, v) { try { localStorage.setItem("tagit." + k, JSON.stringify(v)); } catch {} },
+  };
+  // IndexedDB — only to remember the last directory handle across reloads.
+  const idb = {
+    db: null,
+    open() {
+      return new Promise((res) => {
+        const r = indexedDB.open("tagit", 1);
+        r.onupgradeneeded = () => r.result.createObjectStore("kv");
+        r.onsuccess = () => { this.db = r.result; res(); };
+        r.onerror = () => res();
+      });
+    },
+    async put(k, v) { if (!this.db) return; const tx = this.db.transaction("kv", "readwrite"); tx.objectStore("kv").put(v, k); },
+    get(k) {
+      return new Promise((res) => {
+        if (!this.db) return res(null);
+        const r = this.db.transaction("kv").objectStore("kv").get(k);
+        r.onsuccess = () => res(r.result || null); r.onerror = () => res(null);
+      });
+    },
+    del(k) { if (!this.db) return; this.db.transaction("kv", "readwrite").objectStore("kv").delete(k); },
+  };
+
+  // ---- taxonomy helpers (ported from tagit.R) ------------------------------
+  const RANK_MARKERS = new Set(["subsp.", "var.", "subvar.", "f.", "ssp."]);
+  function stripAuthority(name) {
+    if (!name) return name;
+    const tokens = name.trim().split(/\s+/);
+    const keep = [];
+    tokens.forEach((tok, i) => {
+      const low = tok.toLowerCase();
+      if (i === 0) keep.push(tok);
+      else if (RANK_MARKERS.has(low)) keep.push(tok);
+      else if (/\.$/.test(tok)) { /* author abbrev e.g. Hoffm. */ }
+      else if (/^[A-Z(]/.test(tok)) { /* author surname or (Author) */ }
+      else if (low === "&" || low === "et" || low === "ex") { /* connector */ }
+      else keep.push(tok);
+    });
+    return keep.join(" ");
+  }
+  function lookupFamily(taxon) {
+    if (!taxon) return "";
+    if (S.backbone.has(taxon)) return S.backbone.get(taxon);
+    const lower = taxon.toLowerCase();
+    for (const [k, v] of S.backbone) if (k.toLowerCase() === lower) return v;
+    return "";
+  }
+  function familyFor(taxon) {
+    const f = lookupFamily(taxon);
+    return f || S.sessionFamilies.get(taxon) || "";
+  }
+  function applyCf(taxon) {
+    const parts = taxon.split(" ");
+    return parts.length >= 2
+      ? `${parts[0]} cf. ${parts.slice(1).join(" ")}`
+      : `cf. ${taxon}`;
+  }
+  function composeCaption(taxon, family) {
+    if (!taxon) return "";
+    return family ? `${taxon} (${family})` : taxon;
+  }
+  function composeForTaxa(taxa) {
+    return taxa.map((t) => {
+      let fam = familyFor(t);
+      if (!fam && taxa.length === 1) {
+        const boxed = $("familyBox") && $("familyBox").value.trim();
+        if (boxed) fam = boxed;
+      }
+      const name = S.cf ? applyCf(t) : t;
+      return composeCaption(name, fam);
+    }).filter(Boolean).join(", ");
+  }
+  function attrsOf(taxon) { return S.taxAttrs.get(taxon) || {}; }
+
+  // Build the keyword set for a set of taxa: genus, full name (species), family
+  // and any taxonomy attributes (e.g. "invasive"), all deduplicated. The caption
+  // itself never carries attributes — only these keywords do.
+  const BOOL_TRUE = /^(yes|true|1|x|y|ja|wahr|si|oui)$/i;
+  function autoKeywords(taxa) {
+    const kws = [];
+    const push = (s) => {
+      s = (s || "").toString().trim();
+      if (s && !kws.some((k) => k.toLowerCase() === s.toLowerCase())) kws.push(s);
+    };
+    for (const t of taxa) {
+      if (!t) continue;
+      const clean = t.replace(/\s+cf\.\s+/i, " ").trim();     // keywords ignore the cf. marker
+      push(clean.split(/\s+/)[0]);                            // genus
+      push(clean);                                            // full name (species)
+      let fam = familyFor(t);
+      if (!fam && $("familyBox")) fam = $("familyBox").value.trim();
+      if (fam) push(fam);                                     // family
+      const attrs = attrsOf(t);
+      for (const [col, val] of Object.entries(attrs)) push(BOOL_TRUE.test(val) ? col : val);
+    }
+    return kws;
+  }
+  function parseManualKeywords(str) {
+    return (str || "").split(/[;,\n]/).map((s) => s.trim()).filter(Boolean);
+  }
+  function keywordsForSave(taxa) {
+    const kws = autoKeywords(taxa);
+    for (const m of parseManualKeywords($("keywordsBox") && $("keywordsBox").value)) {
+      if (!kws.some((k) => k.toLowerCase() === m.toLowerCase())) kws.push(m);
+    }
+    return kws;
+  }
+  // Extra keywords on a photo that aren't derivable from its taxa (the manual ones).
+  function manualKeywordsFromPhoto(p) {
+    if (!p || !p.keywords || !p.keywords.length) return [];
+    const auto = new Set(autoKeywords(taxaFromCaption(p.caption)).map((k) => k.toLowerCase()));
+    return p.keywords.filter((k) => !auto.has(k.toLowerCase()));
+  }
+  function taxaFromCaption(caption) {
+    if (!caption) return [];
+    return caption.split(",").map((p) =>
+      p.trim().replace(/\s*\(.*\)$/, "").replace(/ cf\./g, "").trim()
+    ).filter(Boolean);
+  }
+
+  // ---- CSV / observation parsing ------------------------------------------
+  function decodeText(buf) {
+    const bytes = new Uint8Array(buf);
+    if (bytes[0] === 0xff && bytes[1] === 0xfe) return new TextDecoder("utf-16le").decode(buf);
+    if (bytes[0] === 0xfe && bytes[1] === 0xff) return new TextDecoder("utf-16be").decode(buf);
+    return new TextDecoder("utf-8").decode(buf);
+  }
+  // Minimal delimited parser handling quoted fields; delimiter auto-detected.
+  function parseDelimited(text) {
+    text = text.replace(/^﻿/, "");
+    const firstLine = text.slice(0, text.indexOf("\n") >= 0 ? text.indexOf("\n") : text.length);
+    const delim = (firstLine.split("\t").length > firstLine.split(",").length) ? "\t" : ",";
+    const rows = [];
+    let field = "", row = [], inQ = false;
+    for (let i = 0; i < text.length; i++) {
+      const c = text[i];
+      if (inQ) {
+        if (c === '"') { if (text[i + 1] === '"') { field += '"'; i++; } else inQ = false; }
+        else field += c;
+      } else if (c === '"') inQ = true;
+      else if (c === delim) { row.push(field); field = ""; }
+      else if (c === "\n") { row.push(field); rows.push(row); row = []; field = ""; }
+      else if (c !== "\r") field += c;
+    }
+    if (field.length || row.length) { row.push(field); rows.push(row); }
+    if (!rows.length) return { header: [], rows: [] };
+    const header = rows[0].map((h) => h.trim());
+    const objs = rows.slice(1).filter((r) => r.length && r.some((x) => x !== "")).map((r) => {
+      const o = {};
+      header.forEach((h, i) => (o[h] = r[i] !== undefined ? r[i] : ""));
+      return o;
+    });
+    return { header, rows: objs };
+  }
+  // Parse a taxonomy file buffer into { header, rows } — supports CSV/TSV and
+  // Excel (.xlsx/.xls) via the vendored SheetJS build.
+  function parseSpreadsheetBuffer(buf, name) {
+    if (/\.xlsx?$/i.test(name) && typeof XLSX !== "undefined") {
+      const wb = XLSX.read(new Uint8Array(buf), { type: "array" });
+      const ws = wb.Sheets[wb.SheetNames[0]];
+      if (!ws) return { header: [], rows: [] };
+      const grid = XLSX.utils.sheet_to_json(ws, { header: 1, blankrows: false, defval: "" });
+      if (!grid.length) return { header: [], rows: [] };
+      const header = grid[0].map((h) => String(h == null ? "" : h).trim());
+      const rows = grid.slice(1)
+        .filter((r) => r.some((c) => String(c == null ? "" : c).trim() !== ""))
+        .map((r) => { const o = {}; header.forEach((h, i) => (o[h] = r[i] == null ? "" : String(r[i]))); return o; });
+      return { header, rows };
+    }
+    return parseDelimited(decodeText(buf));
+  }
+  function pick(obj, names) {
+    for (const n of names) {
+      const key = Object.keys(obj).find((k) => k.toLowerCase() === n.toLowerCase());
+      if (key && obj[key] != null && obj[key] !== "") return obj[key];
+    }
+    return "";
+  }
+
+  function loadObservations(rows) {
+    S.obs = [];
+    for (const r of rows) {
+      const sp = stripAuthority((pick(r, ["taxon_orig", "species", "taxon", "scientificName"]) || "").trim());
+      const dstr = pick(r, ["date_start", "datetime", "date", "observed_on", "eventDate"]);
+      const dt = dstr ? new Date(dstr.replace(" ", "T")) : null;
+      const locality = pick(r, ["locality_descript", "locality", "place"]);
+      if (sp && dt && !isNaN(dt.getTime())) S.obs.push({ species: sp, datetime: dt, locality });
+    }
+    rebuildChoices();
+    LS.set("obs", S.obs.map((o) => ({ ...o, datetime: o.datetime.toISOString() })));
+    $("obsStatus").textContent = `${S.obs.length} observations loaded`;
+  }
+  function rebuildChoices() {
+    const set = new Set(S.backbone.keys());
+    for (const o of S.obs) set.add(o.species);
+    S.choices = [...set].sort((a, b) => a.localeCompare(b));
+  }
+
+  // ---- taxonomy registry: bundled files + user uploads ---------------------
+  // Turn a filename into a readable label:
+  //   taxonomy_Plants_InfoFlora_Checklist_2017.csv -> "Plants - InfoFlora Checklist 2017"
+  function taxonomyDisplayName(filename) {
+    let base = filename.replace(/\.[^.]+$/, "").replace(/^taxonomy[_-]/i, "");
+    const parts = base.split(/_+/).filter(Boolean);
+    if (parts.length <= 1) return parts.join(" ") || filename;
+    return parts[0] + " - " + parts.slice(1).join(" ");
+  }
+  // Find bundled taxonomies: the directory autoindex works when served locally
+  // (python http.server); a manifest (index.json) is the fallback for GitHub Pages.
+  async function discoverBundled() {
+    const fromAutoindex = async () => {
+      try {
+        const res = await fetch("taxonomies/", { cache: "no-store" });
+        if (!res.ok) return [];
+        const doc = new DOMParser().parseFromString(await res.text(), "text/html");
+        return [...doc.querySelectorAll("a[href]")]
+          .map((a) => a.getAttribute("href")).filter((h) => /\.(csv|tsv|xlsx?)$/i.test(h))
+          .map((h) => decodeURIComponent(h.split("/").pop()))
+          .filter((n) => !/^(~\$|\.)/.test(n));                // skip Excel lock + hidden files
+      } catch { return []; }
+    };
+    const fromManifest = async () => {
+      try {
+        const res = await fetch("taxonomies/index.json", { cache: "no-store" });
+        if (!res.ok) return [];
+        const j = await res.json();
+        return Array.isArray(j) ? j.map((x) => (typeof x === "string" ? x : x.file)).filter(Boolean) : [];
+      } catch { return []; }
+    };
+    let files = await fromAutoindex();
+    if (!files.length) files = await fromManifest();
+    return [...new Set(files)];
+  }
+
+  async function buildTaxonomyRegistry() {
+    S.taxonomies = [];
+    for (const file of await discoverBundled())
+      S.taxonomies.push({ id: "bundled:" + file, name: taxonomyDisplayName(file), source: "bundled", file });
+    for (const u of LS.get("userTaxonomies", []))
+      S.taxonomies.push({ id: u.id, name: u.name, source: "user" });
+    renderTaxonomyList();
+  }
+  // Checkbox list — several taxonomies can be active at once.
+  function renderTaxonomyList() {
+    const box = $("taxonomyList");
+    if (!box) return;
+    box.innerHTML = "";
+    if (!S.taxonomies.length) {
+      box.append(el("p", { className: "hint", textContent: "None available yet — upload one below, or add files to the taxonomies/ folder." }));
+      return;
+    }
+    const group = (label, src) => {
+      const items = S.taxonomies.filter((t) => t.source === src);
+      if (!items.length) return;
+      box.append(el("div", { className: "tx-group", textContent: label }));
+      items.forEach((t) => {
+        const row = el("label", { className: "tx-row" });
+        const cb = el("input", { type: "checkbox" });
+        cb.checked = S.activeTaxonomies.has(t.id);
+        cb.addEventListener("change", () => toggleTaxonomy(t.id, cb.checked));
+        row.append(cb, el("span", { className: "tx-name", textContent: t.name }));
+        if (src === "user") {
+          const del = el("button", { className: "tx-del", textContent: "×", title: "Remove this uploaded taxonomy" });
+          del.addEventListener("click", (e) => { e.preventDefault(); e.stopPropagation(); removeUserTaxonomy(t.id); });
+          row.append(del);
+        }
+        box.append(row);
+      });
+    };
+    group("Bundled", "bundled");
+    group("Your uploads", "user");
+  }
+
+  function detectCol(rowObj, names) {
+    for (const n of names) { const k = Object.keys(rowObj).find((x) => x.toLowerCase() === n.toLowerCase()); if (k) return k; }
+    return "";
+  }
+  // Parse rows into records {taxon, family, attrs}. Every column that isn't the
+  // taxon or family becomes an attribute (e.g. "invasive", "status", …).
+  function rowsToRecords(rows, taxonCol, familyCol) {
+    const out = [];
+    if (!rows.length) return out;
+    const tc = taxonCol || detectCol(rows[0], ["taxon", "species", "Taxonname", "scientificName", "tnrs_species"]);
+    const fc = familyCol || detectCol(rows[0], ["family", "Familie"]);
+    for (const r of rows) {
+      const t = stripAuthority(((tc ? r[tc] : "") || "").trim());
+      if (!t) continue;
+      const f = ((fc ? r[fc] : "") || "").trim();
+      const attrs = {};
+      for (const [k, v] of Object.entries(r)) {
+        if (k === tc || k === fc) continue;
+        const val = (v == null ? "" : String(v)).trim();
+        if (val) attrs[k] = val;
+      }
+      out.push({ taxon: t, family: f, attrs });
+    }
+    return out;
+  }
+
+  async function loadTaxonomyRecords(id) {
+    if (S.taxonomyCache.has(id)) return S.taxonomyCache.get(id);
+    const entry = S.taxonomies.find((t) => t.id === id);
+    let records = [];
+    try {
+      if (entry && entry.source === "bundled") {
+        const res = await fetch("taxonomies/" + entry.file, { cache: "no-store" });
+        if (res.ok) records = rowsToRecords(parseSpreadsheetBuffer(await res.arrayBuffer(), entry.file).rows, entry.taxonCol, entry.familyCol);
+      } else if (entry) {
+        const rec = await idb.get("tax:" + id);
+        if (rec) records = rec.records || (rec.pairs || []).map(([taxon, family]) => ({ taxon, family, attrs: {} }));
+      }
+    } catch (e) { console.error("taxonomy load failed", id, e); }
+    S.taxonomyCache.set(id, records);
+    return records;
+  }
+
+  function mergeRecord(rec) {
+    if (!rec || !rec.taxon) return;
+    if (!S.backbone.has(rec.taxon)) S.backbone.set(rec.taxon, rec.family || "");
+    else if (!S.backbone.get(rec.taxon) && rec.family) S.backbone.set(rec.taxon, rec.family);
+    const cur = S.taxAttrs.get(rec.taxon) || {};
+    if (rec.attrs) for (const [k, v] of Object.entries(rec.attrs)) if (v && !cur[k]) cur[k] = v;
+    S.taxAttrs.set(rec.taxon, cur);
+  }
+  // Rebuild the merged taxon table from all active taxonomies + saved additions.
+  async function rebuildTaxa() {
+    S.backbone = new Map();
+    S.taxAttrs = new Map();
+    for (const id of S.activeTaxonomies) {
+      const records = await loadTaxonomyRecords(id);
+      for (const rec of records) mergeRecord(rec);
+    }
+    for (const rec of (await idb.get("taxadd:global")) || []) mergeRecord(rec);
+    rebuildChoices();
+    updateTaxonomyStatus();
+  }
+  function updateTaxonomyStatus() {
+    if (!$("taxonomyStatus")) return;
+    const n = S.activeTaxonomies.size;
+    $("taxonomyStatus").textContent = S.backbone.size ? `${S.backbone.size} taxa · ${n} active` : "";
+  }
+  async function toggleTaxonomy(id, on) {
+    if (on) S.activeTaxonomies.add(id); else S.activeTaxonomies.delete(id);
+    LS.set("activeTaxonomies", [...S.activeTaxonomies]);
+    setBusy("Loading taxonomies…");
+    try { await rebuildTaxa(); } finally { setBusy(null); }
+  }
+  function removeUserTaxonomy(id) {
+    S.activeTaxonomies.delete(id);
+    S.taxonomyCache.delete(id);
+    LS.set("userTaxonomies", LS.get("userTaxonomies", []).filter((u) => u.id !== id));
+    LS.set("activeTaxonomies", [...S.activeTaxonomies]);
+    idb.del("tax:" + id);
+    buildTaxonomyRegistry();
+    rebuildTaxa();
+    toast("Removed taxonomy.", "info");
+  }
+  // Add a newly determined taxon+family to a global additions overlay + the live table.
+  function growTaxonomy(taxon, family) {
+    if (!taxon || !family || S.backbone.get(taxon)) return;   // skip if already known with a family
+    S.backbone.set(taxon, family);
+    if (!S.taxAttrs.has(taxon)) S.taxAttrs.set(taxon, {});
+    if (!S.choices.includes(taxon)) { S.choices.push(taxon); S.choices.sort((a, b) => a.localeCompare(b)); }
+    updateTaxonomyStatus();
+    idb.get("taxadd:global").then((list) => {
+      list = list || [];
+      if (!list.some((r) => r.taxon === taxon)) { list.push({ taxon, family, attrs: {} }); idb.put("taxadd:global", list); }
+    });
+  }
+
+  // ---- taxonomy upload with column mapping ---------------------------------
+  let pendingUpload = null;                                 // { rows, header, filename }
+  const guessCol = (header, regexes) => header.find((h) => regexes.some((re) => re.test(h))) || header[0] || "";
+  function beginTaxonomyUpload(file, buf) {
+    let parsed;
+    try { parsed = parseSpreadsheetBuffer(buf, file.name); }
+    catch (e) { console.error(e); toast("Couldn't read that file: " + (e.message || e), "warn", 7000); return; }
+    const { header, rows } = parsed;
+    if (!header.length) { toast("That file has no readable columns.", "warn"); return; }
+    pendingUpload = { rows, header, filename: file.name };
+    $("taxNameInput").value = taxonomyDisplayName(file.name);
+    const fill = (sel, guess) => {
+      sel.innerHTML = "";
+      header.forEach((h) => sel.append(el("option", { value: h, textContent: h })));
+      if (guess) sel.value = guess;
+    };
+    const taxonGuess = guessCol(header, [/^taxon\b/i, /^taxon/i, /species/i, /scientific/i, /binomial/i, /name/i]);
+    const rest = header.filter((h) => h !== taxonGuess);
+    const famGuess = guessCol(rest, [/fam/i]) || rest[0] || taxonGuess;
+    fill($("taxColSelect"), taxonGuess);
+    fill($("famColSelect"), famGuess);
+    $("taxonomyMapper").hidden = false;
+  }
+  async function commitTaxonomyUpload() {
+    if (!pendingUpload) return;
+    const name = $("taxNameInput").value.trim() || taxonomyDisplayName(pendingUpload.filename);
+    const records = rowsToRecords(pendingUpload.rows, $("taxColSelect").value, $("famColSelect").value);
+    if (!records.length) { toast("No taxa found with those columns — check your selection.", "warn", 6000); return; }
+    const id = "user:" + Date.now();
+    await idb.put("tax:" + id, { id, name, source: "user", records });
+    const list = LS.get("userTaxonomies", []); list.push({ id, name }); LS.set("userTaxonomies", list);
+    S.taxonomyCache.set(id, records);
+    S.activeTaxonomies.add(id); LS.set("activeTaxonomies", [...S.activeTaxonomies]);
+    pendingUpload = null;
+    $("taxonomyMapper").hidden = true; $("taxonomyFile").value = "";
+    await buildTaxonomyRegistry();
+    await rebuildTaxa();
+    renderTaxonomyList();
+    toast(`Added taxonomy “${name}” (${records.length} taxa) and enabled it.`, "info");
+  }
+  function cancelTaxonomyUpload() {
+    pendingUpload = null; $("taxonomyMapper").hidden = true; $("taxonomyFile").value = "";
+  }
+
+  // ---- suggestions ---------------------------------------------------------
+  function suggestSpecies(photoTime) {
+    if (!photoTime || !S.obs.length) return [];
+    const w = CFG.suggestionWindowMin;
+    return [...new Set(
+      S.obs
+        .map((o) => ({ sp: o.species, gap: Math.abs((o.datetime - photoTime) / 60000) }))
+        .filter((x) => x.gap <= w)
+        .sort((a, b) => a.gap - b.gap)
+        .map((x) => x.sp)
+    )].slice(0, CFG.maxSuggestions);
+  }
+  function suggestLocality(photoTime) {
+    if (!photoTime || !S.obs.length) return "";
+    const w = CFG.suggestionWindowMin;
+    const hit = S.obs
+      .filter((o) => o.locality && Math.abs((o.datetime - photoTime) / 60000) <= w)
+      .sort((a, b) => Math.abs(a.datetime - photoTime) - Math.abs(b.datetime - photoTime))[0];
+    return hit ? hit.locality : "";
+  }
+
+  // ---- iNaturalist computer-vision suggestions -----------------------------
+  function isoDate(d) {
+    if (!d) return "";
+    const p2 = (n) => String(n).padStart(2, "0");
+    return `${d.getFullYear()}-${p2(d.getMonth() + 1)}-${p2(d.getDate())}`;
+  }
+  // The CV model wants a 299x299 JPEG with the aspect ratio squashed to fill it.
+  async function squashTo299(file) {
+    const bmp = await createImageBitmap(file);
+    const c = document.createElement("canvas"); c.width = 299; c.height = 299;
+    c.getContext("2d").drawImage(bmp, 0, 0, 299, 299);   // exact size = squashed, as iNat expects
+    if (bmp.close) bmp.close();
+    return await new Promise((r) => c.toBlob(r, "image/jpeg", 0.9));
+  }
+  async function inatIdentify() {
+    const p = current();
+    if (!p) return;
+    const token = (S.inatToken || "").trim();
+    if (!token) {
+      toast("Add your iNaturalist token under Setup & tools first.", "warn", 6000);
+      const fold = document.querySelector("details.fold"); if (fold) fold.open = true;
+      $("inatToken") && $("inatToken").focus();
+      return;
+    }
+    setBusy("Asking iNaturalist…");
+    try {
+      const img = await squashTo299(await getFile(p));
+      const fd = new FormData();
+      fd.append("image", img, "photo.jpg");
+      if (p.lat != null && p.lon != null) { fd.append("lat", p.lat); fd.append("lng", p.lon); }
+      if (p.datetime) fd.append("observed_on", isoDate(p.datetime));
+      const res = await fetch("https://api.inaturalist.org/v1/computervision/score_image", {
+        method: "POST", headers: { Authorization: "Bearer " + token }, body: fd,
+      });
+      if (res.status === 401) throw new Error("token invalid or expired — get a fresh one");
+      if (!res.ok) throw new Error("HTTP " + res.status);
+      const data = await res.json();
+      const names = (data.results || [])
+        .map((r) => r.taxon && r.taxon.name).filter(Boolean).slice(0, 8);
+      S.inatResults = names;
+      S.inatResultsFor = p;
+      renderInat();
+      if (!names.length) toast("iNaturalist returned no suggestions for this photo.", "info");
+    } catch (e) {
+      console.error(e);
+      toast("iNaturalist request failed: " + (e.message || e) + ".", "warn", 9000);
+    } finally { setBusy(null); }
+  }
+  function renderInat() {
+    const box = $("inatResults"); if (!box) return;
+    box.innerHTML = "";
+    const names = (S.inatResultsFor === current()) ? S.inatResults : [];
+    if (!names.length) return;
+    names.forEach((n) => box.append(el("button", {
+      className: "chip-btn", textContent: n, title: "Add to determination",
+      onclick: () => { addTaxon(n); if (!S.choices.includes(n)) { S.choices.push(n); S.choices.sort((a, b) => a.localeCompare(b)); } },
+    })));
+  }
+  function updateInatStatus(state) {
+    const has = !!(S.inatToken && S.inatToken.trim());
+    const tag = $("inatStatus"); const hint = $("inatHint");
+    if (hint) hint.textContent = has ? "" : "Add a token under Setup & tools to enable AI identification.";
+    if (!tag) return;
+    if (state) tag.textContent = state;                    // e.g. "✓ marco" / "check failed"
+    else tag.textContent = has ? "token set — press Check" : "";
+  }
+  // Verify the token by calling an endpoint that requires authentication, and
+  // report who it belongs to (mirrors the desktop app's "signed in as").
+  async function inatVerify() {
+    const token = (S.inatToken || "").trim();
+    if (!token) { toast("Paste your iNaturalist token first.", "warn"); return; }
+    setBusy("Checking token…");
+    try {
+      const res = await fetch("https://api.inaturalist.org/v1/users/me", {
+        headers: { Authorization: "Bearer " + token },
+      });
+      if (res.status === 401) throw new Error("token invalid or expired");
+      if (!res.ok) throw new Error("HTTP " + res.status);
+      const data = await res.json();
+      const login = data.results && data.results[0] && data.results[0].login;
+      updateInatStatus(login ? "✓ signed in as " + login : "✓ token valid");
+      toast(login ? "iNaturalist token works — signed in as " + login + "." : "iNaturalist token is valid.", "info");
+    } catch (e) {
+      console.error(e);
+      updateInatStatus("✗ check failed");
+      toast("Token check failed: " + (e.message || e) + ".", "warn", 8000);
+    } finally { setBusy(null); }
+  }
+
+  // ---- iNaturalist: create an observation and link it to the photo ---------
+  const inatIdFromUrl = (url) => { const m = (url || "").match(/observations\/(\d+)/); return m ? m[1] : ""; };
+  async function resizeJpeg(file, maxDim) {
+    const bmp = await createImageBitmap(file);
+    const scale = Math.min(1, maxDim / Math.max(bmp.width, bmp.height));
+    const w = Math.round(bmp.width * scale), h = Math.round(bmp.height * scale);
+    const c = document.createElement("canvas"); c.width = w; c.height = h;
+    c.getContext("2d").drawImage(bmp, 0, 0, w, h);
+    if (bmp.close) bmp.close();
+    return await new Promise((r) => c.toBlob(r, "image/jpeg", 0.9));
+  }
+  async function rewritePhotoBytes(p, bytes) {
+    if (S.mode === "download") downloadBytes(p.name, bytes);
+    else { p.fileHandle = await writeBytesTo(p.parentHandle, p.name, bytes); p.url = null; }
+  }
+
+  async function inatCreateObservation() {
+    const p = current(); if (!p) return;
+    const token = (S.inatToken || "").trim();
+    if (!token) { toast("Add your iNaturalist token under Setup & tools first.", "warn", 6000); return; }
+    const taxa = S.selected.length ? S.selected : taxaFromCaption(p.caption);
+    const name = (taxa[0] || "").trim();
+    if (!name) { toast("Pick a taxon for this photo first.", "warn"); return; }
+    if (p.inatUrl && !confirm("This photo is already linked to an observation. Create another?")) return;
+    const geoLabel = { open: "public", obscured: "obscured", private: "private" }[($("inatGeo") && $("inatGeo").value) || "open"];
+    if (!confirm(`Post an iNaturalist observation for “${name}”?\nCoordinates will be ${geoLabel}.\nThis posts to your public iNaturalist account.`)) return;
+    setBusy("Creating iNaturalist observation…");
+    try {
+      let taxonId = null;
+      try {
+        const tr = await fetch("https://api.inaturalist.org/v1/taxa?per_page=1&q=" + encodeURIComponent(name),
+          { headers: { Authorization: "Bearer " + token } });
+        if (tr.ok) { const tj = await tr.json(); taxonId = tj.results && tj.results[0] && tj.results[0].id; }
+      } catch { /* still create as a free-text guess */ }
+
+      const geo = ($("inatGeo") && $("inatGeo").value) || "open";
+      const obs = { species_guess: name, geoprivacy: geo };
+      if (p.datetime) obs.observed_on_string = fmtDate(p.datetime);
+      if (taxonId) obs.taxon_id = taxonId;
+      if (p.lat != null && p.lon != null) { obs.latitude = p.lat; obs.longitude = p.lon; }
+
+      const cr = await fetch("https://api.inaturalist.org/v1/observations", {
+        method: "POST", headers: { Authorization: "Bearer " + token, "Content-Type": "application/json" },
+        body: JSON.stringify({ observation: obs }),
+      });
+      if (cr.status === 401) throw new Error("token invalid or expired");
+      if (!cr.ok) throw new Error("could not create the observation (HTTP " + cr.status + ")");
+      const cj = await cr.json();
+      const obsId = cj.id || (cj.results && cj.results[0] && cj.results[0].id);
+      if (!obsId) throw new Error("observation created but no id returned");
+      const url = "https://www.inaturalist.org/observations/" + obsId;
+
+      try {
+        const img = await resizeJpeg(await getFile(p), 2048);
+        const fd = new FormData();
+        fd.append("observation_photo[observation_id]", String(obsId));
+        fd.append("file", img, "photo.jpg");
+        await fetch("https://api.inaturalist.org/v1/observation_photos",
+          { method: "POST", headers: { Authorization: "Bearer " + token }, body: fd });
+      } catch (e) { console.warn("photo upload to iNaturalist failed", e); }
+
+      p.inatUrl = url;                                       // link it into the photo's metadata
+      const bytes = TagMeta.writeCaption(await getFileBytes(p), p.caption || "", p.keywords || [], url);
+      await rewritePhotoBytes(p, bytes);
+      render();
+      toast("Observation created and linked to the photo.", "info", 6000);
+    } catch (e) {
+      console.error(e); toast("iNaturalist observation failed: " + (e.message || e) + ".", "warn", 9000);
+    } finally { setBusy(null); }
+  }
+
+  // Check every linked photo: if its observation is research grade with a
+  // consensus taxon that differs from the caption, update the caption + keywords.
+  async function inatSyncObservations() {
+    const token = (S.inatToken || "").trim();
+    const linked = S.photos.filter((p) => inatIdFromUrl(p.inatUrl));
+    if (!linked.length) { toast("No photos here are linked to an iNaturalist observation yet.", "info", 5000); return; }
+    setBusy("Checking iNaturalist…");
+    try {
+      const ids = [...new Set(linked.map((p) => inatIdFromUrl(p.inatUrl)))];
+      const statusById = {};
+      for (let i = 0; i < ids.length; i += 100) {
+        const chunk = ids.slice(i, i + 100);
+        const r = await fetch("https://api.inaturalist.org/v1/observations?per_page=200&id=" + chunk.join(","),
+          token ? { headers: { Authorization: "Bearer " + token } } : undefined);
+        if (!r.ok) continue;
+        const j = await r.json();
+        for (const o of (j.results || [])) statusById[String(o.id)] = { grade: o.quality_grade, taxon: o.taxon && o.taxon.name };
+      }
+      const updates = [];
+      for (const p of linked) {
+        const st = statusById[inatIdFromUrl(p.inatUrl)];
+        if (!st || st.grade !== "research" || !st.taxon) continue;
+        if ((p.caption || "").toLowerCase().includes(st.taxon.toLowerCase())) continue;
+        updates.push({ p, taxon: st.taxon });
+      }
+      if (!updates.length) { toast(`Checked ${ids.length} observation(s) — no captions need updating.`, "info", 6000); return; }
+      const list = updates.slice(0, 6).map((u) => `• ${u.p.name}: ${u.taxon}`).join("\n");
+      if (!confirm(`${updates.length} research-grade observation(s) differ from your caption:\n${list}\n\nUpdate the photo captions to iNaturalist's ID?`)) return;
+      let n = 0;
+      for (const { p, taxon } of updates) {
+        const caption = composeCaption(taxon, familyFor(taxon));
+        const keywords = autoKeywords([taxon]);
+        const bytes = TagMeta.writeCaption(await getFileBytes(p), caption, keywords, p.inatUrl);
+        await rewritePhotoBytes(p, bytes);
+        p.caption = caption; p.keywords = keywords;
+        n++;
+      }
+      render();
+      toast(`Updated ${n} caption(s) from iNaturalist.`, "info", 6000);
+    } catch (e) {
+      console.error(e); toast("iNaturalist sync failed: " + (e.message || e) + ".", "warn", 9000);
+    } finally { setBusy(null); }
+  }
+
+  // ---- map (OpenStreetMap embed) --------------------------------------------
+  // A small always-in-place preview sits in the photo's bottom-right corner;
+  // clicking it opens a larger view in a modal (tighter zoom = larger view).
+  function osmEmbed(lat, lon, delta) {
+    const d = delta;
+    const bbox = [lon - d, lat - d, lon + d, lat + d].map((n) => n.toFixed(5)).join("%2C");
+    // No &marker= param — the bbox is symmetric around the point, so it always
+    // lands dead-center, and our own red .map-marker dot sits there instead
+    // (gives us control over its color, which OSM's own pin doesn't offer).
+    return `https://www.openstreetmap.org/export/embed.html?bbox=${bbox}&layer=mapnik`;
+  }
+  function renderPhotoControls() {
+    const p = current();
+    const hasGps = p && p.lat != null && p.lon != null;
+    const corner = $("mapCorner");
+    if (!hasGps) { corner.hidden = true; $("mapCornerFrame").src = "about:blank"; return; }
+    if (S.mapVisible) {
+      const url = osmEmbed(p.lat, p.lon, 0.006);
+      if ($("mapCornerFrame").src !== url) $("mapCornerFrame").src = url;
+      corner.hidden = false;
+    } else {
+      corner.hidden = true; $("mapCornerFrame").src = "about:blank";
+    }
+  }
+  // The "Show/Hide map" control lives inline with the other photo info, added
+  // as a row in #meta by render() (only when the photo has GPS).
+  function mapToggleRow() {
+    const btn = el("button", { id: "mapToggleBtn", className: "meta-map-btn" });
+    btn.textContent = S.mapVisible ? "Hide map" : "Show map ↴";
+    btn.onclick = () => {
+      S.mapVisible = !S.mapVisible; LS.set("mapVisible", S.mapVisible);
+      btn.textContent = S.mapVisible ? "Hide map" : "Show map ↴";
+      renderPhotoControls();
+    };
+    return btn;
+  }
+  function openMapModal() {
+    const p = current();
+    if (!p || p.lat == null || p.lon == null) return;
+    $("mapFrameLarge").src = osmEmbed(p.lat, p.lon, 0.0015);
+    openModal("mapModal");
+  }
+
+  // ---- folder loading ------------------------------------------------------
+  async function verifyPermission(handle, write) {
+    const opts = { mode: write ? "readwrite" : "read" };
+    if ((await handle.queryPermission(opts)) === "granted") return true;
+    return (await handle.requestPermission(opts)) === "granted";
+  }
+
+  async function openFolder() {
+    if (!window.showDirectoryPicker) {
+      toast("This browser can't open a folder. Use Chrome/Edge, or drag photos in below.", "warn", 6000);
+      return;
+    }
+    let handle;
+    try { handle = await window.showDirectoryPicker({ mode: "readwrite" }); }
+    catch (e) { if (e.name !== "AbortError") toast("Couldn't open the folder: " + (e.message || e), "warn", 7000); return; }
+    await useFolder(handle);
+    idb.put("lastFolder", handle);
+  }
+  async function reopenLastFolder() {
+    const handle = await idb.get("lastFolder");
+    if (!handle) return;
+    if (!(await verifyPermission(handle, true))) return;
+    await useFolder(handle);
+  }
+  async function useFolder(handle) {
+    S.mode = "fs";
+    S.rootHandle = handle;
+    S.subHandles = {};
+    $("folderName").textContent = handle.name;
+    await scanAndLoad();
+  }
+
+  const OTHER_IMG_RE = /\.(heic|heif|cr2|cr3|nef|arw|raf|dng|orf|rw2|png|tiff?|gif|webp|bmp|avif)$/i;
+
+  async function scanAndLoad() {
+    const stats = { files: 0, jpeg: 0, unsupported: 0, subdirs: 0, exts: {} };
+    try {
+      setBusy("Scanning folder…");
+      const photos = [];
+      await collectFrom(S.rootHandle, "untouched", photos, null, stats);
+      for (const [status, dir] of Object.entries(STATUS_DIRS)) {
+        try {
+          const sub = await S.rootHandle.getDirectoryHandle(dir);
+          await collectFrom(sub, status, photos, dir, stats);
+        } catch { /* subfolder doesn't exist yet */ }
+      }
+      reportScan(stats, photos.length);
+      beginSession(photos);                 // shows photos immediately; dates load after
+    } catch (e) {
+      console.error("scan failed", e);
+      toast("Could not read this folder: " + (e.message || e), "warn", 8000);
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  // Order photos, show the first one right away, then read EXIF dates/GPS in the
+  // background. Reading is deferred so a slow or malformed file can never stop
+  // the photos from appearing — the single biggest source of "nothing loads".
+  function beginSession(photos) {
+    photos.sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: "base" }));
+    S.photos = photos;
+    S.idx = photos.findIndex((p) => p.status === "untouched");
+    if (S.idx < 0) S.idx = 0;
+    S.undo = null;
+    S.inatResults = []; S.inatResultsFor = null;
+    clearSelection();
+    render();
+    if (photos.length) loadMetaInBackground(photos);
+  }
+
+  function withTimeout(promise, ms) {
+    return Promise.race([
+      promise,
+      new Promise((_, rej) => setTimeout(() => rej(new Error("metadata read timed out")), ms)),
+    ]);
+  }
+
+  async function loadMetaInBackground(photos) {
+    const token = ++S.metaToken;
+    // Read the photo on screen first, so its date/GPS/suggestions appear at once.
+    const order = photos.slice();
+    const cur = S.photos[S.idx];
+    const ci = order.indexOf(cur);
+    if (ci > 0) { order.splice(ci, 1); order.unshift(cur); }
+
+    let done = 0;
+    for (const p of order) {
+      if (token !== S.metaToken) return;                 // a newer load superseded us
+      try {
+        const file = await getFile(p);
+        const m = await withTimeout(TagMeta.readMeta(file), 6000);
+        p.datetime = m.datetime ? new Date(m.datetime.getTime() + CFG.cameraClockOffsetHours * 3600000) : null;
+        p.lat = m.lat; p.lon = m.lon; p.orientation = m.orientation;
+        p.keywords = m.keywords || []; p.inatUrl = m.inatUrl || "";
+        if (!p.caption) p.caption = m.caption;            // keep a caption we already know
+        if (p === S.photos[S.idx]) render();              // refresh date/suggestions live
+      } catch (e) { /* leave this photo's date blank; it still tags fine */ }
+      done++;
+      if (token === S.metaToken && done % 12 === 0)
+        setBusy(done < order.length ? `Reading photo info… ${done}/${order.length}` : null);
+    }
+    if (token === S.metaToken) { setBusy(null); render(); }
+  }
+  async function collectFrom(dirHandle, status, out, dirKey = null, stats = null) {
+    for await (const [name, h] of dirHandle.entries()) {
+      if (h.kind === "directory") { if (stats && status === "untouched" && !SUBDIR_NAMES.includes(name)) stats.subdirs++; continue; }
+      if (stats) stats.files++;
+      if (IMAGE_RE.test(name)) {
+        if (stats) stats.jpeg++;
+        out.push({
+          name, status, fileHandle: h, parentDir: dirKey, parentHandle: dirHandle,
+          datetime: null, lat: null, lon: null, caption: "", keywords: [], inatUrl: "", orientation: 1, url: null,
+        });
+      } else if (stats && OTHER_IMG_RE.test(name)) {
+        stats.unsupported++;
+        const ext = name.slice(name.lastIndexOf(".") + 1).toLowerCase();
+        stats.exts[ext] = (stats.exts[ext] || 0) + 1;
+      }
+    }
+  }
+  // Tell the user in plain language what the scan found — especially when nothing loads.
+  function reportScan(stats, loaded) {
+    const folder = S.rootHandle ? S.rootHandle.name : "folder";
+    if (loaded > 0) {
+      $("folderName").textContent = `${folder} — ${loaded} JPEG${loaded === 1 ? "" : "s"}` +
+        (stats.unsupported ? ` (${stats.unsupported} non-JPEG skipped)` : "");
+      toast(`Loaded ${loaded} JPEG photo${loaded === 1 ? "" : "s"}.`, "info");
+      return;
+    }
+    let msg;
+    if (stats.unsupported > 0) {
+      const kinds = Object.entries(stats.exts).sort((a, b) => b[1] - a[1])
+        .map(([k, v]) => `${v} .${k}`).join(", ");
+      msg = `No JPEGs here — this browser build reads JPEG only. Skipped ${kinds}. ` +
+            `For HEIC/RAW use the desktop tagit.R version.`;
+    } else if (stats.files === 0 && stats.subdirs > 0) {
+      msg = `This folder has no files at its top level, but ${stats.subdirs} subfolder(s). ` +
+            `Open the subfolder that actually holds the photos.`;
+    } else if (stats.files === 0) {
+      msg = `This folder is empty.`;
+    } else {
+      msg = `No JPEG (.jpg/.jpeg) files found (${stats.files} other file${stats.files === 1 ? "" : "s"} here).`;
+    }
+    $("folderName").textContent = `${folder} — no JPEGs found`;
+    toast(msg, "warn", 10000);
+  }
+  // ---- drag & drop fallback (download mode) --------------------------------
+  function acceptDroppedFiles(fileList) {
+    const all = [...fileList];
+    const files = all.filter((f) => IMAGE_RE.test(f.name));
+    if (!files.length) {
+      const other = all.filter((f) => OTHER_IMG_RE.test(f.name)).length;
+      toast(other ? `No JPEGs — ${other} HEIC/RAW/PNG can't be read in the browser.`
+                  : "No JPEG (.jpg/.jpeg) files in what you dropped.", "warn", 8000);
+      return;
+    }
+    S.mode = "download";
+    S.rootHandle = null;
+    $("folderName").textContent = `${files.length} dropped photo${files.length === 1 ? "" : "s"} — captions download as copies`;
+    const photos = files.map((file) => ({
+      name: file.name, status: "untouched", file, fileHandle: null, parentDir: null, parentHandle: null,
+      datetime: null, lat: null, lon: null, caption: "", keywords: [], inatUrl: "", orientation: 1, url: null,
+    }));
+    toast(`Loaded ${files.length} JPEG photo${files.length === 1 ? "" : "s"} (download mode).`, "info");
+    beginSession(photos);
+  }
+
+  // ---- file operations -----------------------------------------------------
+  // Re-acquire a live file handle when it's been cleared (after a move/rotate),
+  // so revisiting or re-saving a photo never fails on a stale handle.
+  async function ensureHandle(p) {
+    if (!p.fileHandle && p.parentHandle) p.fileHandle = await p.parentHandle.getFileHandle(p.name);
+    return p.fileHandle;
+  }
+  async function getFile(p) {
+    if (p.file) return p.file;
+    return (await ensureHandle(p)).getFile();
+  }
+  async function getFileBytes(p) {
+    return new Uint8Array(await (await getFile(p)).arrayBuffer());
+  }
+  async function subHandle(dir) {
+    if (!S.subHandles[dir]) S.subHandles[dir] = await S.rootHandle.getDirectoryHandle(dir, { create: true });
+    return S.subHandles[dir];
+  }
+  async function writeBytesTo(dirHandle, name, bytes) {
+    const fh = await dirHandle.getFileHandle(name, { create: true });
+    const w = await fh.createWritable();
+    await w.write(bytes);
+    await w.close();
+    return fh;
+  }
+  function downloadBytes(name, bytes) {
+    const blob = new Blob([bytes], { type: "image/jpeg" });
+    const a = el("a", { href: URL.createObjectURL(blob), download: name });
+    document.body.append(a); a.click();
+    setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 1000);
+  }
+
+  // Write `bytes` for photo p and move it to `status`. In fs mode this rewrites
+  // the file into the status subfolder and removes the original; in download
+  // mode it just downloads the modified copy. Returns before/after for undo.
+  async function commit(p, bytes, status) {
+    if (S.mode === "download") {
+      if (bytes) downloadBytes(p.name, bytes);
+      return { undo: () => {} };
+    }
+    const targetDir = STATUS_DIRS[status] || null;         // null = stay at root (untouched)
+    const alreadyThere = (p.parentDir || null) === targetDir;
+    const srcParent = p.parentHandle, srcName = p.name;
+    let destParent, destName = p.name;
+
+    let destHandle;
+    if (alreadyThere) {
+      destParent = p.parentHandle;
+      destHandle = bytes ? await writeBytesTo(destParent, destName, bytes)
+                         : await destParent.getFileHandle(destName);
+    } else {
+      destParent = targetDir ? await subHandle(targetDir) : S.rootHandle;
+      destName = await freeName(destParent, p.name);
+      const finalBytes = bytes || (await getFileBytes(p));
+      destHandle = await writeBytesTo(destParent, destName, finalBytes);
+      await srcParent.removeEntry(srcName);
+    }
+    const prev = { parentHandle: srcParent, parentDir: p.parentDir, name: srcName };
+    p.parentHandle = destParent; p.parentDir = targetDir; p.name = destName;
+    p.fileHandle = destHandle;                             // keep a live handle
+    p.url = null;                                          // preview cache invalid
+    // undo closure: move the file back to where it came from
+    return {
+      undo: async () => {
+        try {
+          if (!alreadyThere) {
+            const origBytes = await (await destParent.getFileHandle(destName)).getFile().then((f) => f.arrayBuffer());
+            await writeBytesTo(prev.parentHandle, prev.name, new Uint8Array(origBytes));
+            await destParent.removeEntry(destName);
+            p.parentHandle = prev.parentHandle; p.parentDir = prev.parentDir; p.name = prev.name;
+          }
+          p.fileHandle = null; p.url = null;
+        } catch (e) { console.warn("undo failed", e); }
+      },
+    };
+  }
+  async function freeName(dirHandle, name) {
+    const exists = async (n) => { try { await dirHandle.getFileHandle(n); return true; } catch { return false; } };
+    if (!(await exists(name))) return name;
+    const dot = name.lastIndexOf(".");
+    const base = dot >= 0 ? name.slice(0, dot) : name;
+    const ext = dot >= 0 ? name.slice(dot) : "";
+    let i = 1;
+    while (await exists(`${base}_${i}${ext}`)) i++;
+    return `${base}_${i}${ext}`;
+  }
+
+  // ---- the core actions ----------------------------------------------------
+  function current() { return S.photos[S.idx]; }
+  function visibleIdx() {
+    return S.photos.map((p, i) => (S.statusFilter.has(p.status) ? i : -1)).filter((i) => i >= 0);
+  }
+  function goNext() {
+    const after = visibleIdx().filter((i) => i > S.idx);
+    if (after.length) { S.idx = after[0]; syncSelectionFromCaption(); render(); return true; }
+    return false;
+  }
+  function goPrev() {
+    const before = visibleIdx().filter((i) => i < S.idx);
+    if (before.length) { S.idx = before[before.length - 1]; syncSelectionFromCaption(); render(); return true; }
+    return false;
+  }
+  // ---- end-of-folder recap -------------------------------------------------
+  function computeSessionStats() {
+    const labelled = S.photos.filter((p) => p.status === "labelled");
+    const taxa = new Set(), keywords = new Set();
+    for (const p of labelled) {
+      for (const t of taxaFromCaption(p.caption)) taxa.add(t.toLowerCase());
+      for (const k of (p.keywords || [])) keywords.add(k.toLowerCase());
+    }
+    return {
+      total: S.photos.length,
+      labelled: labelled.length,
+      undetermined: S.photos.filter((p) => p.status === "undetermined").length,
+      skipped: S.photos.filter((p) => p.status === "skipped").length,
+      deleted: S.photos.filter((p) => p.status === "deleted").length,
+      taxa: taxa.size,
+      keywords: keywords.size,
+    };
+  }
+  function showCongrats() {
+    const s = computeSessionStats();
+    $("congratsSub").textContent = `You worked through ${s.total} photo${s.total === 1 ? "" : "s"} in this folder.`;
+    const stat = (label, value) => el("div", { className: "congrats-stat" }, [
+      el("div", { className: "congrats-num", textContent: String(value) }),
+      el("div", { className: "congrats-label", textContent: label }),
+    ]);
+    const box = $("congratsStats"); box.innerHTML = "";
+    box.append(stat("Labelled", s.labelled));
+    box.append(stat("Taxa identified", s.taxa));
+    box.append(stat("Keywords added", s.keywords));
+    if (s.undetermined) box.append(stat("Undetermined", s.undetermined));
+    if (s.skipped) box.append(stat("Skipped", s.skipped));
+    if (s.deleted) box.append(stat("Deleted", s.deleted));
+    closeAllModals();               // don't let an open utility modal obscure the celebration
+    $("congratsOverlay").hidden = false;
+  }
+  function hideCongrats() { $("congratsOverlay").hidden = true; }
+
+  // ---- generic modal open/close (iNaturalist, Navigate & act) --------------
+  function openModal(id) { $(id).hidden = false; }
+  function closeModal(id) { $(id).hidden = true; }
+  function closeAllModals() {
+    document.querySelectorAll(".modal-overlay:not([hidden])").forEach((m) => { m.hidden = true; });
+  }
+
+  // Move on after an action; if the view is exhausted, say so — and if the
+  // whole folder is actually done (nothing left untouched), celebrate it.
+  function afterAdvanceFailed() {
+    syncSelectionFromCaption();
+    render();
+    const remainingUntouched = S.photos.filter((p) => p.status === "untouched").length;
+    if (S.photos.length && remainingUntouched === 0) showCongrats();
+    else toast("All caught up — nothing more to show in the current “Show” filter.", "info", 2800);
+  }
+  function advance() {
+    if (!goNext()) afterAdvanceFailed();
+  }
+  function ensureVisible() {
+    const vis = visibleIdx();
+    if (!vis.length || vis.includes(S.idx)) return;
+    const after = vis.filter((i) => i >= S.idx);
+    S.idx = after.length ? after[0] : vis[vis.length - 1];
+  }
+
+  function snapshot(fileUndo) {
+    // Null the handle/preview on the copies so revisiting after undo re-acquires
+    // a fresh handle (the file may have been moved, invalidating the old one).
+    S.undo = {
+      photos: S.photos.map((p) => ({ ...p, fileHandle: null, url: null })),
+      idx: S.idx, lastCaption: S.lastCaption, recent: [...S.recent], fileUndo,
+    };
+  }
+  async function doUndo() {
+    if (!S.undo) return;
+    const u = S.undo;
+    try { await u.fileUndo(); } catch (e) { console.warn(e); }
+    S.photos = u.photos; S.idx = Math.min(u.idx, S.photos.length - 1);
+    S.lastCaption = u.lastCaption; S.recent = u.recent; S.undo = null;
+    syncSelectionFromCaption();
+    render();
+  }
+
+  function noteRecent(taxa) {
+    if (!taxa.length) return;
+    S.recent = [...new Set([...taxa, ...S.recent])].slice(0, CFG.maxRecent);
+    LS.set("recent", S.recent);
+  }
+  function rememberFamilies(taxa) {
+    for (const t of taxa) {
+      let fam = familyFor(t);
+      if (!fam && taxa.length === 1 && $("familyBox")) fam = $("familyBox").value.trim();
+      if (!fam) continue;
+      if (!S.sessionFamilies.has(t)) S.sessionFamilies.set(t, fam);
+      growTaxonomy(t, fam);                                 // add new taxa to the taxonomy so they persist
+    }
+  }
+
+  // Shared move+record: write optional bytes, move to `status`, snapshot for undo.
+  // origBytes (fs mode only) restores the file's original metadata on undo.
+  async function applyStatus(p, status, caption, bytes, taxa, keywords, origBytes) {
+    const before = { ...p };
+    const res = await commit(p, bytes, status);
+    let fileUndo = res.undo;
+    if (origBytes && S.mode === "fs") {
+      const baseUndo = res.undo;
+      fileUndo = async () => {
+        await baseUndo();                                        // move the file back
+        try { await writeBytesTo(p.parentHandle, p.name, origBytes); }  // restore original metadata
+        catch (e) { console.warn("metadata restore on undo failed", e); }
+      };
+    }
+    snapshot(fileUndo);
+    Object.assign(S.undo.photos[S.photos.indexOf(p)], before, { fileHandle: null, url: null });
+    if (caption != null) { p.caption = caption; S.lastCaption = caption; }
+    if (keywords != null) p.keywords = keywords;
+    p.status = status;
+    if (taxa) { rememberFamilies(taxa); noteRecent(taxa); }
+  }
+
+  // Assemble the bytes to write: original (optionally watermarked) + caption,
+  // keywords and any existing iNaturalist link.
+  async function composeSaveBytes(p, caption, keywords) {
+    let bytes = await getFileBytes(p);
+    if (S.watermark.enabled && S.watermark.text.trim())
+      bytes = await applyWatermark(bytes, S.watermark.text.trim(), p.orientation, S.watermark);
+    return TagMeta.writeCaption(bytes, caption, keywords, p.inatUrl || "");
+  }
+
+  // Burn a text watermark into the image at the chosen corner, font and size,
+  // then restore the original EXIF (date/GPS/orientation) which the canvas
+  // re-encode drops.
+  const WM_FONT_STACK = {
+    sans: "-apple-system, BlinkMacSystemFont, 'Segoe UI', Arial, sans-serif",
+    serif: "Georgia, 'Times New Roman', serif",
+    mono: "ui-monospace, 'SF Mono', Menlo, monospace",
+  };
+  async function applyWatermark(u8, text, orientation, opts) {
+    try {
+      const bmp = await createImageBitmap(new Blob([u8], { type: "image/jpeg" }));
+      const w = bmp.width, h = bmp.height;
+      const canvas = document.createElement("canvas"); canvas.width = w; canvas.height = h;
+      const ctx = canvas.getContext("2d");
+      ctx.drawImage(bmp, 0, 0);
+      if (bmp.close) bmp.close();
+
+      const sizePct = (opts && opts.sizePct) || 2.8;
+      const fontStack = WM_FONT_STACK[(opts && opts.font) || "sans"] || WM_FONT_STACK.sans;
+      const position = (opts && opts.position) || "br";
+      const fs = Math.max(11, Math.round(Math.min(w, h) * (sizePct / 100)));
+      const pad = Math.round(fs * 0.7);
+      ctx.font = `600 ${fs}px ${fontStack}`;
+
+      const atRight = position === "br" || position === "tr";
+      const atBottom = position === "br" || position === "bl";
+      ctx.textAlign = atRight ? "right" : "left";
+      ctx.textBaseline = atBottom ? "bottom" : "top";
+      const x = atRight ? w - pad : pad;
+      const y = atBottom ? h - pad : pad;
+
+      ctx.fillStyle = "rgba(0,0,0,0.5)"; ctx.fillText(text, x + 1, y + 1);
+      ctx.fillStyle = "rgba(255,255,255,0.92)"; ctx.fillText(text, x, y);
+
+      const blob = await new Promise((r) => canvas.toBlob(r, "image/jpeg", 0.92));
+      return TagMeta.copyExif(u8, new Uint8Array(await blob.arrayBuffer()));
+    } catch (e) { console.warn("watermark failed, saving without it", e); return u8; }
+  }
+
+  async function finalizeCaptionSave(p, caption, taxa) {
+    if (!p) return false;
+    setBusy("Saving…");
+    try {
+      const origBytes = S.mode === "fs" ? await getFileBytes(p) : null;
+      const keywords = keywordsForSave(taxa);
+      const bytes = await composeSaveBytes(p, caption, keywords);
+      await applyStatus(p, "labelled", caption, bytes, taxa, keywords, origBytes);
+      return true;
+    } catch (e) {
+      console.error(e);
+      toast("Couldn’t save this photo: " + (e.message || e), "warn", 7000);
+      return false;
+    } finally { setBusy(null); }
+  }
+
+  async function doSave() {
+    const caption = $("captionBox").value.trim();
+    if (!caption) { toast("Add a taxon or type a caption first.", "info", 2500); return; }
+    if (await finalizeCaptionSave(current(), caption, [...S.selected])) advance();
+  }
+  async function instantSave(taxa) {
+    const caption = composeForTaxa(taxa);
+    if (!caption) return;
+    if (await finalizeCaptionSave(current(), caption, taxa)) advance();
+  }
+  async function saveSameAsPrevious() {
+    if (!S.lastCaption) { toast("Nothing saved yet to reuse.", "info", 2500); return; }
+    if (await finalizeCaptionSave(current(), S.lastCaption, taxaFromCaption(S.lastCaption))) advance();
+  }
+
+  async function markUndetermined() {
+    const p = current();
+    if (!p) return;
+    setBusy("Saving…");
+    try {
+      const keywords = parseManualKeywords($("keywordsBox") && $("keywordsBox").value);
+      const origBytes = S.mode === "fs" ? await getFileBytes(p) : null;
+      let bytes = null;
+      try { bytes = await composeSaveBytes(p, CFG.undeterminedCaption, keywords); }
+      catch (e) { console.warn("caption write failed, moving anyway", e); }
+      await applyStatus(p, "undetermined", CFG.undeterminedCaption, bytes, null, keywords, origBytes);
+      advance();
+    } catch (e) {
+      console.error(e); toast("Couldn’t mark undetermined: " + (e.message || e), "warn", 7000);
+    } finally { setBusy(null); }
+  }
+  async function skipCurrent() {
+    const p = current();
+    if (!p) return;
+    try { await applyStatus(p, "skipped", null, null, null); advance(); }
+    catch (e) { console.error(e); toast("Couldn’t skip: " + (e.message || e), "warn", 7000); }
+  }
+  async function discardCurrent() {
+    const p = current();
+    if (!p) return;
+    try {
+      await applyStatus(p, "deleted", null, null, null);
+      if (!goNext()) { ensureVisible(); afterAdvanceFailed(); }
+    } catch (e) { console.error(e); toast("Couldn’t delete: " + (e.message || e), "warn", 7000); }
+  }
+  async function rotateCurrent() {
+    const p = current();
+    if (!p) return;
+    setBusy("Rotating…");
+    try {
+      const { bytes, orientation } = TagMeta.rotateCW(await getFileBytes(p), p.orientation);
+      if (S.mode === "download") downloadBytes(p.name, bytes);
+      else p.fileHandle = await writeBytesTo(p.parentHandle, p.name, bytes);
+      p.orientation = orientation; p.url = null;
+    } catch (e) { toast("Rotate failed: " + (e.message || e), "warn"); }
+    setBusy(null);
+    render();
+  }
+  function copyLast() { if (S.lastCaption) { $("captionBox").value = S.lastCaption; } }
+
+  // ---- selection ------------------------------------------------------------
+  function addTaxon(t) {
+    t = t.trim();
+    if (t && !S.selected.includes(t)) { S.selected.push(t); renderSelection(); updateCaptionBox(); }
+  }
+  function clearSelection() {
+    S.selected = []; S.cf = false;
+    if ($("cfBox")) $("cfBox").checked = false;
+    if ($("captionBox")) $("captionBox").value = "";
+    if ($("keywordsBox")) $("keywordsBox").value = "";
+    renderSelection(); renderFamilyBox();
+  }
+  // Re-derive the taxon selection (and the caption box) from the current photo's
+  // stored caption, so moving between photos always shows the right state and
+  // never leaves the previous photo's caption stuck in the box.
+  function syncSelectionFromCaption() {
+    const p = current();
+    S.selected = p ? taxaFromCaption(p.caption) : [];
+    S.cf = p ? /cf\./.test(p.caption) : false;
+    if ($("cfBox")) $("cfBox").checked = S.cf;
+    renderSelection();
+    if ($("captionBox")) $("captionBox").value = composeForTaxa(S.selected);
+    if ($("keywordsBox")) $("keywordsBox").value = manualKeywordsFromPhoto(p).join(", ");
+    renderFamilyBox();
+  }
+  function updateCaptionBox() {
+    if ($("captionBox")) $("captionBox").value = composeForTaxa(S.selected);
+    renderFamilyBox();
+  }
+
+  // =========================================================================
+  // Rendering
+  // =========================================================================
+  function setBusy(msg) {
+    $("busy").textContent = msg || "";
+    $("busy").style.display = msg ? "block" : "none";
+  }
+
+  async function render() {
+    const p = current();
+    if (S._zoomPhoto !== p) {
+      S._zoomPhoto = p; resetZoom();
+      if (!$("mapModal").hidden) closeModal("mapModal");  // don't leave the old photo's location showing
+    }
+    renderCounts();
+    if (!p) {
+      $("photo").src = "";
+      $("meta").hidden = true; $("meta").innerHTML = "";
+      $("statusCorner").textContent = ""; $("statusCorner").hidden = true;
+      renderSuggestions(); renderRecent(); renderSelection();
+      renderInat(); renderPhotoControls();
+      return;
+    }
+    // preview
+    try {
+      if (!p.url) p.url = URL.createObjectURL(await getFile(p));
+      $("photo").src = p.url;
+    } catch (e) { console.warn("preview failed", e); $("photo").src = ""; }
+
+    // Everything about this photo overlays the bottom of the photo itself —
+    // filename first, then date/time/locality/caption/keywords/link. Status
+    // sits separately, bottom-right corner (under the map preview if shown).
+    $("meta").innerHTML = "";
+    $("meta").append(el("div", { className: "meta-filename", textContent: p.name }));
+    const corner = $("statusCorner");
+    corner.hidden = false;
+    corner.textContent = STATUS_LABEL[p.status].text;
+    corner.style.color = STATUS_LABEL[p.status].color;
+
+    const bits = [];
+    if (p.datetime) { bits.push("Date: " + fmtDay(p.datetime)); bits.push("Time: " + fmtTime(p.datetime)); }
+    else bits.push("Date taken: unknown");
+    const loc = suggestLocality(p.datetime);
+    if (loc) bits.push("Locality (log): " + loc);
+    bits.push(p.caption ? "Caption: " + p.caption : "No caption yet");
+    for (const b of bits) $("meta").append(el("div", { textContent: b }));
+    if (p.keywords && p.keywords.length) {
+      $("meta").append(el("div", { className: "meta-overlay-kw", textContent: p.keywords.join(" · ") }));
+    }
+    if (p.inatUrl) {
+      const d = el("div", { className: "meta-link" });
+      d.append(el("a", { href: p.inatUrl, target: "_blank", rel: "noopener", textContent: "iNaturalist observation ↗" }));
+      $("meta").append(d);
+    }
+    if (p.lat != null && p.lon != null) $("meta").append(mapToggleRow());
+    $("meta").hidden = !S.infoVisible;
+
+    renderSuggestions(); renderRecent(); renderSelection();
+    renderInat(); renderPhotoControls();
+    if (!$("captionBox").value) updateCaptionBox();
+  }
+
+  const STATUS_LABEL = {
+    untouched: { text: "○ untouched", color: "#7a857d" },
+    labelled: { text: "✓ labelled", color: "#2f8f5b" },
+    skipped: { text: "• skipped", color: "#b7791f" },
+    undetermined: { text: "? undetermined", color: "#6d5bd0" },
+    deleted: { text: "✗ deleted", color: "#c0392b" },
+  };
+  const _p2 = (n) => String(n).padStart(2, "0");
+  function fmtDate(d) { return `${fmtDay(d)} ${fmtTime(d)}`; }
+  function fmtDay(d) { return `${d.getFullYear()}-${_p2(d.getMonth() + 1)}-${_p2(d.getDate())}`; }
+  function fmtTime(d) { return `${_p2(d.getHours())}:${_p2(d.getMinutes())}`; }
+  function renderCounts() {
+    const c = { untouched: 0, labelled: 0, skipped: 0, undetermined: 0, deleted: 0 };
+    for (const p of S.photos) c[p.status]++;
+    const total = Math.max(S.photos.length, 1);
+    const done = c.labelled + c.skipped + c.deleted;
+    $("barDone").style.width = Math.round((100 * done) / total) + "%";
+    $("barUndet").style.width = Math.round((100 * c.undetermined) / total) + "%";
+    $("progressText").textContent =
+      `${c.untouched} untouched, ${c.labelled} labelled, ${c.skipped} skipped, ` +
+      `${c.undetermined} undetermined, ${c.deleted} deleted ` +
+      `(showing #${S.photos.length ? S.idx + 1 : 0} of ${S.photos.length})`;
+  }
+  function renderSuggestions() {
+    // The whole section stays hidden until an observation log is loaded —
+    // no point showing "no matches" when there's nothing to match against.
+    if ($("suggSection")) $("suggSection").hidden = S.obs.length === 0;
+    if (!S.obs.length) return;
+    const box = $("suggestions"); box.innerHTML = "";
+    const sp = current() ? suggestSpecies(current().datetime) : [];
+    if (!sp.length) { box.append(el("em", { textContent: "No observation-log matches near this time.", className: "muted" })); return; }
+    sp.forEach((s, i) => {
+      const label = i < 9 ? `${i + 1}: ${s}` : s;
+      box.append(el("button", { className: "chip-btn", textContent: label, onclick: () => instantSave([...new Set([...S.selected, s])]) }));
+    });
+  }
+  function renderRecent() {
+    const box = $("recent"); box.innerHTML = "";
+    if (!S.recent.length) { box.append(el("em", { textContent: "None yet — saved taxa appear here.", className: "muted" })); return; }
+    S.recent.forEach((s) => box.append(el("button", { className: "chip-btn", textContent: s, onclick: () => instantSave([...new Set([...S.selected, s])]) })));
+  }
+  // Selected taxa aren't shown as chips — the caption box (and the photo
+  // overlay once saved) already reflects them, so a separate chip list would
+  // just duplicate that and cost vertical space. Kept as a no-op so existing
+  // call sites don't need to change.
+  function renderSelection() {}
+  function renderFamilyBox() {
+    const holder = $("familyHolder"); holder.innerHTML = "";
+    if (S.selected.length === 1 && !lookupFamily(S.selected[0])) {
+      const prefill = S.sessionFamilies.get(S.selected[0]) || "";
+      holder.append(el("label", { className: "field-label", textContent: "Family (new taxon — added to your taxonomy on save)" }));
+      const inp = el("input", { id: "familyBox", className: "input", value: prefill, placeholder: "e.g. Asteraceae" });
+      inp.addEventListener("input", () => { $("captionBox").value = composeForTaxa(S.selected); });
+      holder.append(inp);
+    }
+  }
+
+  // ---- photo zoom & pan ----------------------------------------------------
+  let resetZoom = () => {};
+  function setupZoom() {
+    const stage = document.querySelector(".stage");
+    const img = $("photo");
+    if (!stage || !img) return;
+    let scale = 1, tx = 0, ty = 0, dragging = false, sx = 0, sy = 0, moved = false;
+    const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
+    const apply = () => {
+      img.style.transform = `translate(${tx}px, ${ty}px) scale(${scale})`;
+      img.style.cursor = scale > 1 ? (dragging ? "grabbing" : "grab") : "zoom-in";
+    };
+    const zoomAt = (clientX, clientY, factor) => {
+      const rect = img.getBoundingClientRect();
+      const cx = clientX - (rect.left + rect.width / 2);
+      const cy = clientY - (rect.top + rect.height / 2);
+      const s2 = clamp(scale * factor, 1, 8);
+      tx += cx * (1 - s2 / scale);
+      ty += cy * (1 - s2 / scale);
+      scale = s2;
+      if (scale <= 1.001) { scale = 1; tx = 0; ty = 0; }
+      apply();
+    };
+    resetZoom = () => { scale = 1; tx = 0; ty = 0; apply(); };
+
+    stage.addEventListener("wheel", (e) => {
+      if (!img.getAttribute("src")) return;
+      e.preventDefault();
+      zoomAt(e.clientX, e.clientY, e.deltaY < 0 ? 1.18 : 1 / 1.18);
+    }, { passive: false });
+
+    img.addEventListener("mousedown", (e) => {
+      moved = false;                                       // reset at the start of every press
+      if (scale <= 1) return;                              // only pan when zoomed in
+      dragging = true; sx = e.clientX - tx; sy = e.clientY - ty;
+      e.preventDefault(); apply();
+    });
+    window.addEventListener("mousemove", (e) => {
+      if (!dragging) return;
+      tx = e.clientX - sx; ty = e.clientY - sy; moved = true; apply();
+    });
+    window.addEventListener("mouseup", () => { if (dragging) { dragging = false; apply(); } });
+
+    img.addEventListener("click", (e) => {
+      if (moved) { moved = false; return; }              // a drag, not a click
+      if (scale === 1) zoomAt(e.clientX, e.clientY, 2.5); // click to zoom in at point
+      else resetZoom();                                   // click again to zoom out
+    });
+    img.addEventListener("dblclick", (e) => { e.preventDefault(); resetZoom(); });
+  }
+
+  // ---- autocomplete dropdown ----------------------------------------------
+  function setupAutocomplete() {
+    const input = $("taxonInput");
+    const menu = $("acMenu");
+    let items = [], hi = -1;
+    const close = () => { menu.style.display = "none"; items = []; hi = -1; };
+    const open = () => {
+      const q = input.value.trim().toLowerCase();
+      menu.innerHTML = "";
+      let matches = [];
+      if (q) {
+        matches = S.choices.filter((c) => c.toLowerCase().includes(q)).slice(0, 50);
+      }
+      items = matches.slice();
+      const exact = q && S.choices.some((c) => c.toLowerCase() === q);
+      matches.forEach((m, i) => {
+        menu.append(el("div", { className: "ac-item", textContent: m, onmousedown: (e) => { e.preventDefault(); pickItem(m); } }));
+      });
+      if (q && !exact) {
+        const addTxt = `＋ Add “${input.value.trim()}”`;
+        items.push(input.value.trim());
+        menu.append(el("div", { className: "ac-item ac-add", textContent: addTxt, onmousedown: (e) => { e.preventDefault(); pickItem(input.value.trim()); } }));
+      }
+      menu.style.display = items.length ? "block" : "none";
+      hi = -1;
+    };
+    const pickItem = (t) => { addTaxon(t); input.value = ""; close(); input.focus(); };
+    const highlight = () => {
+      [...menu.children].forEach((c, i) => c.classList.toggle("hi", i === hi));
+    };
+    input.addEventListener("input", open);
+    input.addEventListener("focus", open);
+    input.addEventListener("blur", () => setTimeout(close, 150));
+    input.addEventListener("keydown", (e) => {
+      if (menu.style.display === "none" && e.key !== "Enter") return;
+      if (e.key === "ArrowDown") { e.preventDefault(); hi = Math.min(hi + 1, menu.children.length - 1); highlight(); }
+      else if (e.key === "ArrowUp") { e.preventDefault(); hi = Math.max(hi - 1, 0); highlight(); }
+      else if (e.key === "Enter") {
+        e.preventDefault();
+        if (hi >= 0 && items[hi]) pickItem(items[hi]);
+        else if (input.value.trim()) pickItem(input.value.trim());
+        else doSave();
+      } else if (e.key === "Escape") close();
+    });
+  }
+
+  // =========================================================================
+  // Wiring
+  // =========================================================================
+  function wireButtons() {
+    $("openFolder").onclick = openFolder;
+    if ($("emptyOpen")) $("emptyOpen").onclick = openFolder;
+    $("saveBtn").onclick = doSave;
+    $("copyLastBtn").onclick = copyLast;
+
+    // back to the setup page (taxonomies, iNaturalist, watermark, settings)
+    $("setupBtn").onclick = () => openModal("setupModal");
+    $("helpBtn").onclick = () => openModal("helpModal");
+
+    // toggle the photo-info panel (map / date / time / caption / keywords)
+    $("infoToggleBtn").onclick = () => {
+      S.infoVisible = !S.infoVisible;
+      LS.set("infoVisible", S.infoVisible);
+      applyInfoVisibility();
+    };
+
+    // end-of-folder recap
+    $("congratsCloseBtn").onclick = hideCongrats;
+    $("congratsOverlay").addEventListener("click", (e) => { if (e.target.id === "congratsOverlay") hideCongrats(); });
+
+    // iNaturalist / Navigate & act: full-height modals opened from a slim row
+    $("inatModalBtn").onclick = () => openModal("inatModal");
+    $("navModalBtn").onclick = () => openModal("navModal");
+
+    // Small corner map preview on the photo — click (or Enter/Space) to enlarge
+    $("mapCorner").addEventListener("click", openMapModal);
+    $("mapCorner").addEventListener("keydown", (e) => {
+      if (e.key === "Enter" || e.key === " ") { e.preventDefault(); openMapModal(); }
+    });
+    document.querySelectorAll(".modal-close").forEach((btn) => {
+      btn.onclick = () => closeModal(btn.dataset.close);
+    });
+    document.querySelectorAll(".modal-overlay").forEach((overlay) => {
+      overlay.addEventListener("click", (e) => { if (e.target === overlay) closeModal(overlay.id); });
+    });
+    document.addEventListener("keydown", (e) => {
+      if (e.key !== "Escape") return;
+      if (!$("congratsOverlay").hidden) hideCongrats();
+      closeAllModals();
+    });
+    $("prevBtn").onclick = goPrev;
+    $("nextBtn").onclick = goNext;
+    $("rotateBtn").onclick = rotateCurrent;
+    $("undoBtn").onclick = doUndo;
+    $("skipBtn").onclick = skipCurrent;
+    $("undetBtn").onclick = markUndetermined;
+    $("deleteBtn").onclick = discardCurrent;
+
+    $("cfBox").addEventListener("change", (e) => { S.cf = e.target.checked; updateCaptionBox(); });
+
+    // status filter checkboxes
+    document.querySelectorAll("#statusFilter input").forEach((cb) => {
+      cb.checked = S.statusFilter.has(cb.value);
+      cb.addEventListener("change", () => {
+        if (cb.checked) S.statusFilter.add(cb.value); else S.statusFilter.delete(cb.value);
+        ensureVisible(); render();
+      });
+    });
+
+    // taxonomy chooser (multi-select list rendered by renderTaxonomyList) + upload
+    $("uploadTaxonomyBtn").onclick = () => $("taxonomyFile").click();
+    $("taxonomyFile").addEventListener("change", async (e) => {
+      const f = e.target.files[0]; if (!f) return;
+      beginTaxonomyUpload(f, await f.arrayBuffer());
+    });
+    $("taxAddBtn").onclick = commitTaxonomyUpload;
+    $("taxCancelBtn").onclick = cancelTaxonomyUpload;
+
+    // observation log
+    $("obsFile").addEventListener("change", async (e) => {
+      const f = e.target.files[0]; if (!f) return;
+      loadObservations(parseDelimited(decodeText(await f.arrayBuffer())).rows);
+      renderSuggestions();                                  // reveal the section immediately
+    });
+
+    // manual keywords: re-compose is not needed (kept separate from caption),
+    // but keep the box in sync-friendly state on the current photo.
+
+    // watermark
+    $("wmEnable").checked = S.watermark.enabled;
+    $("wmText").value = S.watermark.text;
+    $("wmPosition").value = S.watermark.position;
+    $("wmFont").value = S.watermark.font;
+    $("wmSize").value = S.watermark.sizePct;
+    const saveWm = () => {
+      S.watermark = {
+        enabled: $("wmEnable").checked,
+        text: $("wmText").value,
+        position: $("wmPosition").value,
+        font: $("wmFont").value,
+        sizePct: Math.min(10, Math.max(1, (+$("wmSize").value) || 2.8)),
+      };
+      LS.set("watermark", S.watermark);
+    };
+    $("wmEnable").addEventListener("change", saveWm);
+    $("wmText").addEventListener("input", saveWm);
+    $("wmPosition").addEventListener("change", saveWm);
+    $("wmFont").addEventListener("change", saveWm);
+    $("wmSize").addEventListener("change", saveWm);
+
+    // iNaturalist
+    $("inatAskBtn").onclick = inatIdentify;
+    $("inatCheckBtn").onclick = inatVerify;
+    $("inatObsBtn").onclick = inatCreateObservation;
+    $("inatSyncBtn").onclick = inatSyncObservations;
+    $("inatGeo").value = LS.get("inatGeo", "open");
+    $("inatGeo").addEventListener("change", (e) => LS.set("inatGeo", e.target.value));
+    $("inatToken").value = S.inatToken;
+    updateInatStatus();
+    $("inatToken").addEventListener("input", (e) => {
+      S.inatToken = e.target.value.trim();
+      LS.set("inatToken", S.inatToken);
+      updateInatStatus();
+    });
+
+    // settings
+    $("windowMin").value = CFG.suggestionWindowMin;
+    $("clockOffset").value = CFG.cameraClockOffsetHours;
+    $("windowMin").addEventListener("change", (e) => { CFG.suggestionWindowMin = +e.target.value || 5; LS.set("windowMin", CFG.suggestionWindowMin); render(); });
+    $("clockOffset").addEventListener("change", (e) => { CFG.cameraClockOffsetHours = +e.target.value || 0; LS.set("clockOffset", CFG.cameraClockOffsetHours); });
+  }
+
+  function wireDropzone() {
+    const dz = document.body;
+    ["dragover", "drop"].forEach((ev) => dz.addEventListener(ev, (e) => e.preventDefault()));
+    dz.addEventListener("dragover", () => $("dropHint").classList.add("active"));
+    dz.addEventListener("dragleave", () => $("dropHint").classList.remove("active"));
+    dz.addEventListener("drop", async (e) => {
+      $("dropHint").classList.remove("active");
+      if (e.dataTransfer.files.length) await acceptDroppedFiles(e.dataTransfer.files);
+    });
+  }
+
+  function wireKeyboard() {
+    document.addEventListener("keydown", (e) => {
+      const tag = (e.target.tagName || "").toLowerCase();
+      if (tag === "input" || tag === "textarea" || e.target.isContentEditable) return;
+      if (!S.photos.length) return;
+      const k = e.key;
+      if (k === "ArrowRight") { e.preventDefault(); goNext(); }
+      else if (k === "ArrowLeft") { e.preventDefault(); goPrev(); }
+      else if (k === "r" || k === "R") { e.preventDefault(); rotateCurrent(); }
+      else if (k === "c" || k === "C") { e.preventDefault(); copyLast(); }
+      else if (k === "u" || k === "U") { e.preventDefault(); doUndo(); }
+      else if (k === "i" || k === "I") { e.preventDefault(); markUndetermined(); }
+      else if (k === "s" || k === "S") { e.preventDefault(); saveSameAsPrevious(); }
+      else if (/^[1-9]$/.test(k)) {
+        e.preventDefault();
+        const sp = suggestSpecies(current().datetime);
+        const n = +k;
+        if (n <= sp.length) instantSave([...new Set([...S.selected, sp[n - 1]])]);
+      } else if (k === "Delete" || k === "Backspace") {
+        if (!S.selected.length) { e.preventDefault(); discardCurrent(); }
+      }
+    });
+  }
+
+  // ---- restore persisted data ---------------------------------------------
+  function restore() {
+    const obs = LS.get("obs", null);
+    if (obs) { S.obs = obs.map((o) => ({ ...o, datetime: new Date(o.datetime) })); rebuildChoices(); $("obsStatus").textContent = `${S.obs.length} observations loaded (saved)`; }
+    S.recent = LS.get("recent", []);
+    S.inatToken = LS.get("inatToken", "");
+    S.mapVisible = LS.get("mapVisible", false);
+    S.infoVisible = LS.get("infoVisible", true);
+    S.watermark = LS.get("watermark", { enabled: false, text: "", position: "br", font: "sans", sizePct: 2.8 });
+    CFG.suggestionWindowMin = LS.get("windowMin", CFG.suggestionWindowMin);
+    CFG.cameraClockOffsetHours = LS.get("clockOffset", CFG.cameraClockOffsetHours);
+  }
+
+  // Show/hide the on-photo info overlay (filename, status, date, time,
+  // caption, keywords), and reflect the state on the toggle button.
+  function applyInfoVisibility() {
+    if ($("meta")) $("meta").hidden = !S.infoVisible || !current();
+    if ($("statusCorner")) $("statusCorner").hidden = !S.infoVisible || !current();
+    const btn = $("infoToggleBtn");
+    btn.setAttribute("aria-pressed", String(S.infoVisible));
+    btn.title = S.infoVisible ? "Hide photo info (filename, status, date, time, caption, keywords)" : "Show photo info (filename, status, date, time, caption, keywords)";
+  }
+
+  // ---- boot ----------------------------------------------------------------
+  async function boot() {
+    window.addEventListener("unhandledrejection", (e) => {
+      console.error("unhandled", e.reason);
+      toast("Unexpected error: " + (e.reason?.message || e.reason), "warn", 7000);
+    });
+    if (!window.showDirectoryPicker) $("noFsWarning").style.display = "block";
+    await idb.open();
+    restore();
+    applyInfoVisibility();
+    wireButtons(); wireDropzone(); wireKeyboard(); setupAutocomplete(); setupZoom();
+    render();
+    // Discover taxonomies. On first run, enable all bundled ones by default;
+    // otherwise restore the set the user had active (several can be on at once).
+    await buildTaxonomyRegistry();
+    const saved = LS.get("activeTaxonomies", null);
+    if (saved === null) S.activeTaxonomies = new Set(S.taxonomies.filter((t) => t.source === "bundled").map((t) => t.id));
+    else S.activeTaxonomies = new Set(saved.filter((id) => S.taxonomies.some((t) => t.id === id)));
+    LS.set("activeTaxonomies", [...S.activeTaxonomies]);
+    renderTaxonomyList();
+    await rebuildTaxa();
+    // offer to reopen last folder (needs a click for permission on most builds)
+    const last = await idb.get("lastFolder");
+    if (last) {
+      $("reopenBtn").style.display = "inline-block";
+      $("reopenBtn").textContent = `Reopen “${last.name}”`;
+      $("reopenBtn").onclick = reopenLastFolder;
+    }
+  }
+
+  document.addEventListener("DOMContentLoaded", boot);
+})();

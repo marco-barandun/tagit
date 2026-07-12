@@ -1,0 +1,663 @@
+/* =============================================================================
+   tagit — herbarium / field-notebook visual identity
+   Botanical-green accent over warm paper neutrals; specimen data set in mono.
+   Theme via prefers-color-scheme, overridable by [data-theme] on :root.
+   ============================================================================= */
+
+:root {
+  /* neutrals — warm paper with a faint green bias */
+  --ground: #f4f6f1;
+  --surface: #ffffff;
+  --elevated: #ffffff;
+  --ink: #1a201c;
+  --muted: #5f6b62;
+  --faint: #8a948b;
+  --hair: #e3e7de;
+  --hair-strong: #d3d9cd;
+
+  /* accent — botanical green (the single bold hue) */
+  --accent: #2f6b47;
+  --accent-strong: #245538;
+  --accent-ink: #ffffff;
+  --accent-soft: rgba(47, 107, 71, 0.10);
+  --accent-line: rgba(47, 107, 71, 0.28);
+
+  /* status semantics — deliberately separate from the accent */
+  --done: #2f8f5b;
+  --undet: #6d5bd0;
+  --danger: #c0392b;
+  --danger-soft: rgba(192, 57, 43, 0.10);
+
+  --shadow-sm: 0 1px 2px rgba(24, 40, 30, 0.05), 0 1px 3px rgba(24, 40, 30, 0.06);
+  --shadow-md: 0 4px 14px rgba(24, 40, 30, 0.08), 0 1px 3px rgba(24, 40, 30, 0.06);
+  --shadow-lg: 0 18px 48px rgba(24, 40, 30, 0.14);
+
+  --r-sm: 8px;
+  --r-md: 12px;
+  --r-lg: 18px;
+  --pad: 22px;
+
+  --ui: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  --mono: ui-monospace, "SF Mono", "JetBrains Mono", "Menlo", "Cascadia Code", monospace;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --ground: #0f120e;
+    --surface: #171b15;
+    --elevated: #1c211a;
+    --ink: #e9ece6;
+    --muted: #9aa397;
+    --faint: #6f7a6d;
+    --hair: #262b23;
+    --hair-strong: #333a30;
+    --accent: #4fa971;
+    --accent-strong: #63bd85;
+    --accent-ink: #0c1a11;
+    --accent-soft: rgba(79, 169, 113, 0.14);
+    --accent-line: rgba(79, 169, 113, 0.34);
+    --done: #4bbd7d;
+    --undet: #9384f0;
+    --danger: #ef6a5c;
+    --danger-soft: rgba(239, 106, 92, 0.14);
+    --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.3);
+    --shadow-md: 0 6px 20px rgba(0, 0, 0, 0.4);
+    --shadow-lg: 0 20px 54px rgba(0, 0, 0, 0.55);
+  }
+}
+/* explicit toggle wins in both directions */
+:root[data-theme="light"] {
+  --ground: #f4f6f1; --surface: #ffffff; --elevated: #ffffff; --ink: #1a201c;
+  --muted: #5f6b62; --faint: #8a948b; --hair: #e3e7de; --hair-strong: #d3d9cd;
+  --accent: #2f6b47; --accent-strong: #245538; --accent-ink: #ffffff;
+  --accent-soft: rgba(47,107,71,.10); --accent-line: rgba(47,107,71,.28);
+  --done: #2f8f5b; --undet: #6d5bd0; --danger: #c0392b; --danger-soft: rgba(192,57,43,.10);
+  --shadow-sm: 0 1px 2px rgba(24,40,30,.05), 0 1px 3px rgba(24,40,30,.06);
+  --shadow-md: 0 4px 14px rgba(24,40,30,.08), 0 1px 3px rgba(24,40,30,.06);
+  --shadow-lg: 0 18px 48px rgba(24,40,30,.14);
+}
+:root[data-theme="dark"] {
+  --ground: #0f120e; --surface: #171b15; --elevated: #1c211a; --ink: #e9ece6;
+  --muted: #9aa397; --faint: #6f7a6d; --hair: #262b23; --hair-strong: #333a30;
+  --accent: #4fa971; --accent-strong: #63bd85; --accent-ink: #0c1a11;
+  --accent-soft: rgba(79,169,113,.14); --accent-line: rgba(79,169,113,.34);
+  --done: #4bbd7d; --undet: #9384f0; --danger: #ef6a5c; --danger-soft: rgba(239,106,92,.14);
+  --shadow-sm: 0 1px 2px rgba(0,0,0,.3);
+  --shadow-md: 0 6px 20px rgba(0,0,0,.4);
+  --shadow-lg: 0 20px 54px rgba(0,0,0,.55);
+}
+
+/* ---------- base ---------- */
+* { box-sizing: border-box; }
+html { -webkit-text-size-adjust: 100%; }
+
+/* Scrollbars — darker thumb in dark mode with a light contour, dark fill. */
+* { scrollbar-width: thin; scrollbar-color: var(--hair-strong) transparent; }
+::-webkit-scrollbar { width: 12px; height: 12px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb {
+  background: var(--hair-strong); border-radius: 8px;
+  border: 3px solid var(--surface);
+}
+::-webkit-scrollbar-thumb:hover { background: var(--muted); }
+:root[data-theme="dark"] ::-webkit-scrollbar-thumb,
+:root:not([data-theme="light"]) ::-webkit-scrollbar-thumb {
+  background: #0c0e0b;                                   /* dark fill */
+  border: 2px solid var(--hair-strong);                 /* lighter contour */
+  border-radius: 8px;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) * { scrollbar-color: #0c0e0b var(--surface); }
+}
+:root[data-theme="dark"] * { scrollbar-color: #0c0e0b var(--surface); }
+:root[data-theme="dark"] ::-webkit-scrollbar-thumb:hover,
+:root:not([data-theme="light"]) ::-webkit-scrollbar-thumb:hover { border-color: var(--muted); }
+body {
+  margin: 0;
+  font: 15px/1.45 var(--ui);
+  color: var(--ink);
+  background: var(--ground);
+  -webkit-font-smoothing: antialiased;
+}
+h1, h2, h3, h4 { margin: 0; font-weight: 650; letter-spacing: -0.01em; }
+code {
+  font-family: var(--mono); font-size: 0.85em;
+  background: var(--accent-soft); color: var(--accent-strong);
+  padding: 1px 5px; border-radius: 5px;
+}
+kbd {
+  font-family: var(--mono); font-size: 11px; line-height: 1;
+  padding: 3px 5px; border-radius: 5px; margin-left: 2px;
+  background: color-mix(in srgb, currentColor 12%, transparent);
+  border: 1px solid color-mix(in srgb, currentColor 22%, transparent);
+}
+::selection { background: var(--accent-soft); }
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 6px; }
+
+/* ---------- app bar ---------- */
+.appbar {
+  position: sticky; top: 0; z-index: 20;
+  display: flex; align-items: center; justify-content: space-between;
+  gap: 16px; padding: 12px clamp(16px, 4vw, 32px);
+  background: color-mix(in srgb, var(--ground) 82%, transparent);
+  backdrop-filter: saturate(1.4) blur(10px);
+  border-bottom: 1px solid var(--hair);
+}
+.brand { display: flex; align-items: center; gap: 12px; flex: 1 1 auto; min-width: 0; }
+.leaf { width: 26px; height: 26px; fill: var(--accent); flex: none; }
+.wordmark {
+  font-size: 22px; font-weight: 700; letter-spacing: -0.03em;
+  color: var(--ink);
+}
+.privacy {
+  display: inline-flex; align-items: center; gap: 6px;
+  font-size: 11.5px; font-weight: 550; letter-spacing: 0.02em;
+  color: var(--muted); padding: 4px 10px; border-radius: 999px;
+  border: 1px solid var(--hair); background: var(--surface);
+}
+.privacy .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--done); box-shadow: 0 0 0 3px var(--accent-soft); }
+.appbar-actions { display: flex; align-items: center; gap: 8px; }
+
+/* ---------- buttons ---------- */
+.btn {
+  --_fg: var(--ink);
+  display: inline-flex; align-items: center; justify-content: center; gap: 7px;
+  font: inherit; font-weight: 550; font-size: 14px; color: var(--_fg);
+  padding: 8px 13px; border-radius: var(--r-sm);
+  border: 1px solid var(--hair-strong); background: var(--surface);
+  cursor: pointer; transition: transform .12s ease, box-shadow .12s ease,
+    background .12s ease, border-color .12s ease; white-space: nowrap;
+}
+.btn:hover { border-color: var(--accent-line); box-shadow: var(--shadow-sm); }
+.btn:active { transform: translateY(1px); }
+.btn .ic { width: 17px; height: 17px; flex: none; }
+.btn .ic-t { font-size: 15px; opacity: .8; }
+.btn .sub { color: var(--faint); font-weight: 450; font-size: 12px; }
+.btn-primary {
+  background: var(--accent); border-color: var(--accent); color: var(--accent-ink);
+  box-shadow: var(--shadow-sm);
+}
+.btn-primary:hover { background: var(--accent-strong); border-color: var(--accent-strong); box-shadow: var(--shadow-md); }
+.btn-ghost { background: transparent; border-color: var(--hair); }
+.btn-ghost:hover { background: var(--accent-soft); }
+.btn-danger { background: transparent; color: var(--danger); border-color: color-mix(in srgb, var(--danger) 40%, var(--hair)); }
+.btn-danger:hover { background: var(--danger-soft); border-color: var(--danger); box-shadow: none; }
+.btn-icon { padding: 8px; width: 38px; }
+.btn-icon .ic { width: 19px; height: 19px; }
+.btn-icon[aria-pressed="false"] { color: var(--faint); background: transparent; }
+.btn-icon[aria-pressed="true"] { color: var(--accent-strong); border-color: var(--accent-line); background: var(--accent-soft); }
+.btn.full { width: 100%; }
+.btn kbd { color: var(--faint); }
+.btn-primary kbd { color: var(--accent-ink); }
+
+/* Dark mode: darker button fill with a lighter contour (per request). */
+:root[data-theme="dark"] .btn:not(.btn-primary):not(.btn-danger):not(.btn-inat) { background: #0d0f0c; border-color: var(--hair-strong); }
+:root[data-theme="dark"] .btn:not(.btn-primary):not(.btn-danger):not(.btn-inat):hover { background: #12150f; border-color: var(--muted); }
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) .btn:not(.btn-primary):not(.btn-danger):not(.btn-inat) { background: #0d0f0c; border-color: var(--hair-strong); }
+  :root:not([data-theme="light"]) .btn:not(.btn-primary):not(.btn-danger):not(.btn-inat):hover { background: #12150f; border-color: var(--muted); }
+}
+
+/* theme toggle icon: show sun in light, moon in dark */
+.moon { display: none; }
+:root[data-theme="dark"] .sun { display: none; }
+:root[data-theme="dark"] .moon { display: inline; }
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) .sun { display: none; }
+  :root:not([data-theme="light"]) .moon { display: inline; }
+}
+
+/* Folder status — inline next to "Local only" to save the vertical space a
+   separate bar used to take. */
+.folder-inline {
+  font-family: var(--mono); font-size: 12px; color: var(--muted);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0;
+}
+.warn-banner {
+  margin: 12px clamp(16px, 4vw, 32px) 0;
+  padding: 12px 16px; border-radius: var(--r-md);
+  background: var(--accent-soft); border: 1px solid var(--accent-line);
+  color: var(--ink); font-size: 13.5px;
+}
+
+/* ---------- workspace ---------- */
+.shell {
+  display: grid; grid-template-columns: 380px minmax(0, 1fr);
+  gap: 24px; align-items: start;
+  max-width: 1440px; margin: 0 auto;
+  padding: 24px clamp(16px, 4vw, 32px) 48px;
+}
+
+/* ---------- control panel ---------- */
+.panel {
+  background: var(--surface); border: 1px solid var(--hair);
+  border-radius: var(--r-lg); box-shadow: var(--shadow-md);
+  display: flex; flex-direction: column; overflow: hidden;
+}
+.panel-scroll { flex: 1 1 auto; min-height: 0; overflow-y: auto; overscroll-behavior: contain; }
+.panel-head {
+  flex: none; border-bottom: 1px solid var(--hair);
+  padding: 16px var(--pad); background: var(--surface);
+  border-radius: var(--r-lg) var(--r-lg) 0 0;
+}
+.panel-foot {
+  flex: none; border-top: 1px solid var(--hair);
+  padding: 12px var(--pad); background: var(--surface);
+  border-radius: 0 0 var(--r-lg) var(--r-lg);
+}
+.panel-foot .progress { margin: 0 0 8px; }
+
+/* Sidebar rows that open a section in a full-height modal instead of
+   expanding inline — inline expansion left too little room (the sidebar is a
+   fixed-height column with a pinned head/foot), so anything with more than a
+   couple of controls felt cramped no matter how it was arranged. */
+.row-btn {
+  width: 100%; cursor: pointer; border: none; border-bottom: 1px solid var(--hair);
+  background: transparent; font: inherit;
+  padding: 14px var(--pad); display: flex; align-items: center; justify-content: space-between; gap: 8px;
+  font-size: 11px; font-weight: 650; letter-spacing: 0.09em; text-transform: uppercase;
+  color: var(--faint); transition: background .12s ease, color .12s ease;
+}
+.row-btn:hover { background: var(--accent-soft); color: var(--accent-strong); }
+.row-btn .ic { width: 15px; height: 15px; opacity: 0.75; flex: none; }
+
+/* Modal dialog (iNaturalist, Navigate & act) — gets the full viewport height
+   regardless of window size, unlike the sidebar's constrained middle. */
+.modal-overlay {
+  position: fixed; inset: 0; z-index: 300; display: flex; align-items: center; justify-content: center;
+  background: color-mix(in srgb, var(--ink) 45%, transparent);
+  backdrop-filter: blur(3px);
+  padding: 20px;
+}
+.modal-overlay[hidden] { display: none; }
+.modal-card {
+  width: min(94vw, 440px); max-height: min(86vh, 720px);
+  display: flex; flex-direction: column; overflow: hidden;
+  background: var(--surface); border: 1px solid var(--hair);
+  border-radius: var(--r-lg); box-shadow: var(--shadow-lg);
+  animation: congrats-in 0.22s cubic-bezier(.2, .9, .3, 1.2);
+}
+.modal-header {
+  flex: none; display: flex; align-items: center; justify-content: space-between;
+  padding: 15px var(--pad); border-bottom: 1px solid var(--hair);
+}
+.modal-header h3 { font-size: 15px; font-weight: 650; letter-spacing: -0.01em; }
+.modal-close {
+  flex: none; width: 30px; height: 30px; border-radius: 50%;
+  border: none; background: transparent; color: var(--muted); cursor: pointer;
+  font-size: 19px; line-height: 1; display: grid; place-items: center;
+  transition: background .12s ease, color .12s ease;
+}
+.modal-close:hover { background: var(--accent-soft); color: var(--accent-strong); }
+.modal-card > .fold-sec-body,
+.modal-card > .fold-body { flex: 1 1 auto; min-height: 0; overflow-y: auto; }
+.modal-card-wide { width: min(94vw, 520px); }
+
+.fold-sec-body { padding: 6px var(--pad) 20px; display: flex; flex-direction: column; gap: 12px; }
+/* The flex `gap` above is the single source of vertical rhythm in here — zero
+   out any margin a child would otherwise bring, so spacing never doubles.
+   Selectors are deliberately more specific than the base rules they override,
+   so this holds regardless of where those rules sit in the file. */
+.fold-sec-body > .btn.full,
+.fold-sec-body > .field-label,
+.fold-sec-body > .hint,
+.fold-sec-body > #inatResults:not(:empty) {
+  margin: 0;
+}
+.sec { padding: 18px var(--pad); border-bottom: 1px solid var(--hair); }
+.sec:last-child { border-bottom: none; }
+.eyebrow {
+  font-size: 11px; font-weight: 650; letter-spacing: 0.09em; text-transform: uppercase;
+  color: var(--faint); margin-bottom: 10px;
+}
+
+/* Field labels that introduce a control (keywords, geoprivacy, family, …) —
+   consistent breathing room above and below, everywhere they're used. */
+.field-label {
+  display: block; font-size: 12.5px; font-weight: 600;
+  color: var(--muted); letter-spacing: 0.01em;
+  margin: 16px 0 7px;
+}
+.field-label:first-child { margin-top: 0; }
+
+/* inputs */
+.input {
+  width: 100%; padding: 9px 11px; font: inherit; font-size: 14px;
+  color: var(--ink); background: var(--ground);
+  border: 1px solid var(--hair-strong); border-radius: var(--r-sm);
+  transition: border-color .12s ease, box-shadow .12s ease, background .12s ease;
+}
+.input:focus { outline: none; border-color: var(--accent); background: var(--surface); box-shadow: 0 0 0 3px var(--accent-soft); }
+.input.mono { font-family: var(--mono); font-size: 13px; }
+.input.small { width: 100%; }
+.input::placeholder { color: var(--faint); }
+
+select.input {
+  appearance: none; -webkit-appearance: none; cursor: pointer; padding-right: 30px;
+  background-image: linear-gradient(45deg, transparent 50%, var(--muted) 50%),
+                    linear-gradient(135deg, var(--muted) 50%, transparent 50%);
+  background-position: right 13px center, right 8px center;
+  background-size: 5px 5px, 5px 5px; background-repeat: no-repeat;
+}
+.mapper {
+  margin-top: 12px; padding: 14px; border: 1px solid var(--hair-strong);
+  border-radius: var(--r-md); background: var(--ground);
+}
+.mapper .field-label { margin-top: 0; }
+
+.inat-token-row { display: flex; gap: 8px; align-items: stretch; }
+.inat-token-row .input { flex: 1 1 auto; min-width: 0; }
+.inat-token-row .btn { flex: none; }
+
+/* taxonomy multi-select list */
+.tx-list { border: 1px solid var(--hair); border-radius: var(--r-sm); overflow: hidden; }
+.tx-group { font-size: 10.5px; font-weight: 650; letter-spacing: 0.08em; text-transform: uppercase; color: var(--faint); padding: 8px 12px 4px; }
+.tx-row { display: flex; align-items: center; gap: 9px; padding: 7px 12px; cursor: pointer; border-top: 1px solid var(--hair); }
+.tx-group + .tx-row { border-top: none; }
+.tx-row:hover { background: var(--accent-soft); }
+.tx-row input { accent-color: var(--accent); width: 15px; height: 15px; flex: none; }
+.tx-name { flex: 1 1 auto; font-size: 13.5px; }
+.tx-del { flex: none; border: none; background: transparent; color: var(--faint); cursor: pointer; font-size: 16px; line-height: 1; padding: 2px 4px; border-radius: 4px; }
+.tx-del:hover { color: var(--danger); background: var(--danger-soft); }
+
+/* iNaturalist observation link in the photo info */
+.meta-link a { color: var(--accent-strong); text-decoration: none; font-size: 12.5px; font-weight: 550; }
+.meta-link a:hover { text-decoration: underline; }
+
+.check { display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--muted); margin-top: 10px; cursor: pointer; }
+.check input { accent-color: var(--accent); width: 15px; height: 15px; }
+
+/* suggestion / recent pills — same compact chip style throughout; Suggestions
+   gets room for two rows, Recently used just one, to keep this area small. */
+.btn-area { display: flex; flex-wrap: wrap; gap: 6px; overflow-y: auto; }
+.chip-btn {
+  font: inherit; font-size: 11px; padding: 3px 9px; line-height: 1.15;
+  border: 1px solid var(--hair-strong); background: var(--ground); color: var(--ink);
+  border-radius: 999px; cursor: pointer; transition: all .12s ease;
+}
+.chip-btn:hover { border-color: var(--accent); background: var(--accent-soft); color: var(--accent-strong); }
+.muted { color: var(--faint); font-size: 13px; font-style: italic; }
+
+#suggestions.btn-area { min-height: 24px; max-height: 58px; }
+.btn-area.recent { min-height: 24px; max-height: 28px; }
+
+/* autocomplete */
+.ac-wrap { position: relative; }
+.ac-menu {
+  display: none; position: absolute; z-index: 40; left: 0; right: 0; top: calc(100% + 6px);
+  background: var(--elevated); border: 1px solid var(--hair-strong); border-radius: var(--r-md);
+  max-height: 280px; overflow-y: auto; box-shadow: var(--shadow-lg); padding: 5px;
+}
+.ac-item { padding: 8px 10px; cursor: pointer; font-size: 14px; border-radius: var(--r-sm); }
+.ac-item:hover, .ac-item.hi { background: var(--accent-soft); }
+.ac-add { color: var(--accent-strong); font-weight: 600; margin-top: 3px; border-top: 1px solid var(--hair); border-radius: 0 0 var(--r-sm) var(--r-sm); }
+
+/* Family prompt for a new taxon — floats below the taxon input as a popover
+   (like the autocomplete menu) instead of permanently occupying layout space. */
+.family-popover:empty { display: none; }
+.family-popover {
+  position: absolute; z-index: 34; left: 0; right: 0; top: calc(100% + 6px);
+  background: var(--elevated); border: 1px solid var(--hair-strong); border-radius: var(--r-md);
+  box-shadow: var(--shadow-lg); padding: 12px 14px;
+}
+.family-popover .field-label { margin: 0 0 7px; }
+#familyBox { width: 100%; padding: 9px 11px; font: inherit; font-size: 14px; color: var(--ink);
+  background: var(--ground); border: 1px solid var(--hair-strong); border-radius: var(--r-sm); }
+#familyBox:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+
+/* action grid */
+.full { margin-top: 10px; }
+.grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+
+/* segmented status filter */
+.segmented { display: flex; flex-wrap: wrap; gap: 6px; }
+.seg { position: relative; cursor: pointer; }
+.seg input { position: absolute; opacity: 0; pointer-events: none; }
+.seg span {
+  display: inline-block; font-size: 12.5px; padding: 5px 11px; border-radius: 999px;
+  border: 1px solid var(--hair-strong); color: var(--muted); background: var(--ground);
+  transition: all .12s ease;
+}
+.seg:hover span { border-color: var(--accent-line); }
+.seg input:checked + span { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); font-weight: 550; }
+.seg input:focus-visible + span { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+/* progress */
+.progress { display: flex; height: 8px; margin: 14px 0 8px; border-radius: 999px; overflow: hidden; background: var(--hair); }
+.bar-done { height: 100%; width: 0; background: linear-gradient(90deg, var(--accent), var(--done)); transition: width .3s ease; }
+.bar-undet { height: 100%; width: 0; background: var(--undet); transition: width .3s ease; }
+.progress-text { font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; }
+
+/* ---------- photo stage ---------- */
+.stage-col { min-width: 0; }
+.stage {
+  position: relative; display: grid; place-items: center;
+  min-height: 340px; padding: 20px; overflow: hidden;
+  background:
+    linear-gradient(var(--surface), var(--surface)) padding-box,
+    var(--surface);
+  border: 1px solid var(--hair); border-radius: var(--r-lg);
+  box-shadow: var(--shadow-md);
+  background-image: radial-gradient(circle at 1px 1px, var(--hair) 1px, transparent 0);
+  background-size: 22px 22px;
+}
+#photo {
+  max-width: 100%; max-height: 74vh; display: block; border-radius: 6px;
+  box-shadow: var(--shadow-lg); background: var(--surface);
+  transform-origin: center center; will-change: transform;
+  cursor: zoom-in; -webkit-user-drag: none; user-select: none; touch-action: none;
+}
+#photo[src=""] { display: none; }
+.empty { display: none; flex-direction: column; align-items: center; gap: 14px; color: var(--faint); text-align: center; padding: 48px 0; }
+#photo[src=""] ~ .empty { display: flex; }
+.empty svg { width: 54px; height: 54px; opacity: .7; }
+.empty p { margin: 0; font-size: 14px; }
+
+/* The "basics" (date, time, caption, keywords, iNat link) overlaid on the
+   bottom of the photo itself — always reachable with no scrolling, regardless
+   of the photo's own height. A fixed dark-scrim/light-text pair is used here
+   (not the theme tokens) since this sits on top of arbitrary photo content,
+   not the page background. */
+.meta-overlay {
+  position: absolute; left: 0; right: 0; bottom: 0; z-index: 2;
+  display: flex; flex-direction: column; gap: 3px;
+  padding: 14px 16px 12px;
+  max-height: 58%; overflow-y: auto;
+  background: linear-gradient(to top, rgba(10, 14, 11, 0.82) 0%, rgba(10, 14, 11, 0.55) 60%, transparent 100%);
+  font-family: var(--mono); font-size: 12px; line-height: 1.5; color: #f1f3ef;
+}
+.meta-overlay[hidden] { display: none; }
+.meta-overlay > div { text-shadow: 0 1px 3px rgba(0, 0, 0, 0.5); word-break: break-word; }
+.meta-overlay .meta-link a { color: #a9e6bf; font-weight: 600; }
+.meta-overlay-kw { font-size: 10.5px; color: #cfd9d2; opacity: 0.82; margin-top: 1px; letter-spacing: 0.01em; }
+
+/* Filename — first line of the overlay */
+.meta-filename {
+  font-size: 12.5px; font-weight: 650; color: #fff; word-break: break-all;
+}
+/* Status badge — sits in the bottom-right corner stack, under the map preview
+   (or alone, in the map's spot, when the photo has no GPS). */
+.meta-status-badge {
+  font-size: 10.5px; font-weight: 700; letter-spacing: 0.02em;
+  padding: 3px 10px; border-radius: 999px; white-space: nowrap;
+  background: color-mix(in srgb, currentColor 22%, rgba(0, 0, 0, 0.55));
+  border: 1px solid color-mix(in srgb, currentColor 45%, transparent);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.4);
+  /* The status colors are tuned for the sidebar's light/dark surfaces; on the
+     photo's dark scrim they need a legibility boost (the muted grey used for
+     "untouched" is the weakest case). */
+  filter: brightness(1.3) saturate(1.15);
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.6);
+}
+.meta-status-badge[hidden] { display: none; }
+
+.btn.small { padding: 6px 12px; font-size: 13px; }
+
+/* "Show/Hide map" control inline with the other photo info */
+.meta-map-btn {
+  align-self: flex-start; margin-top: 2px;
+  border: 1px solid rgba(255, 255, 255, 0.35); background: rgba(255, 255, 255, 0.08);
+  color: #f1f3ef; font: inherit; font-size: 11.5px; font-weight: 600;
+  padding: 4px 10px; border-radius: 999px; cursor: pointer;
+  transition: background .12s ease, border-color .12s ease;
+}
+.meta-map-btn:hover { background: rgba(255, 255, 255, 0.18); border-color: rgba(255, 255, 255, 0.55); }
+
+/* Bottom-right corner stack: map preview on top, status badge underneath
+   (or the badge alone, in the map's spot, when there's no GPS). */
+.corner-stack {
+  position: absolute; right: 12px; bottom: 12px; z-index: 3;
+  display: flex; flex-direction: column; align-items: flex-end; gap: 8px;
+}
+/* Small map preview; click to enlarge (opens #mapModal with a closer zoom). */
+.map-corner {
+  width: 148px; height: 108px; border-radius: 8px; overflow: hidden;
+  border: 2px solid rgba(255, 255, 255, 0.85); box-shadow: 0 6px 18px rgba(0, 0, 0, 0.45);
+  cursor: zoom-in; transition: transform .15s ease, box-shadow .15s ease;
+}
+.map-corner:hover { transform: scale(1.04); box-shadow: 0 8px 22px rgba(0, 0, 0, 0.55); }
+.map-corner:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.map-corner[hidden] { display: none; }
+/* OpenStreetMap's embed always includes its attribution strip + zoom control,
+   which at this preview's true size would dominate the whole box. Rendering
+   the iframe 3x oversized and scaling it back down shrinks that chrome
+   proportionally along with the map, so it reads as a quiet corner label
+   instead of a wall of text. */
+.map-corner iframe {
+  width: 444px; height: 324px; border: 0; pointer-events: none;
+  transform: scale(0.3333); transform-origin: top left;
+}
+
+/* Enlarged map modal */
+.map-modal-body { position: relative; flex: 1 1 auto; min-height: 0; }
+.map-modal-body iframe { display: block; width: 100%; height: min(65vh, 520px); border: 0; }
+
+/* The photo's location, marked in red. The embed's bbox is always built
+   symmetrically around the point (see osmEmbed()), so it sits dead-center
+   regardless of zoom — a plain centered dot works without reading pixel
+   coordinates back out of the map. */
+.map-marker {
+  position: absolute; top: 50%; left: 50%; z-index: 4;
+  width: 12px; height: 12px; margin: -6px 0 0 -6px;
+  border-radius: 50%; background: #e0362f;
+  border: 2px solid #fff; box-shadow: 0 1px 4px rgba(0, 0, 0, 0.55);
+  pointer-events: none;
+}
+
+/* iNaturalist identify button + suggestions */
+.btn-inat { background: var(--accent-soft); border-color: var(--accent-line); color: var(--accent-strong); font-weight: 600; }
+.btn-inat:hover { background: color-mix(in srgb, var(--accent) 18%, transparent); border-color: var(--accent); }
+.btn-inat .ic { width: 18px; height: 18px; }
+#inatResults:empty { min-height: 0; }
+#inatResults:not(:empty) { margin-top: 14px; }
+
+/* busy pill */
+.busy {
+  position: absolute; top: 14px; left: 50%; transform: translateX(-50%); z-index: 5;
+  background: var(--ink); color: var(--ground); padding: 7px 16px; border-radius: 999px;
+  font-size: 12.5px; font-weight: 550; box-shadow: var(--shadow-md);
+}
+
+/* folds */
+.fold { margin-top: 16px; border: 1px solid var(--hair); border-radius: var(--r-md); background: var(--surface); box-shadow: var(--shadow-sm); }
+.fold > summary { cursor: pointer; font-weight: 600; font-size: 14px; padding: 13px 18px; list-style: none; display: flex; align-items: center; gap: 8px; }
+.fold > summary::-webkit-details-marker { display: none; }
+.fold > summary::before { content: "›"; font-size: 18px; color: var(--accent); transition: transform .15s ease; line-height: 1; }
+.fold[open] > summary::before { transform: rotate(90deg); }
+.fold-body { padding: 4px 18px 18px; }
+.fold-body h4 { margin-top: 16px; font-size: 13.5px; }
+.fold-body h4:first-child { margin-top: 6px; }
+.hint { color: var(--muted); font-size: 13px; line-height: 1.5; }
+.fold-body ul { margin: 6px 0 0; padding-left: 18px; }
+.fold-body li { margin-bottom: 5px; }
+.fold-body input[type=file] { margin-top: 8px; font-size: 13px; max-width: 100%; }
+.tag { font-size: 11.5px; font-weight: 550; color: var(--accent-strong); background: var(--accent-soft); padding: 2px 8px; border-radius: 999px; margin-left: 4px; }
+.tag:empty { display: none; }
+.settings-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-top: 10px; }
+.settings-grid label { display: flex; flex-direction: column; gap: 6px; font-size: 12px; color: var(--muted); }
+
+/* ---------- drop overlay ---------- */
+#dropHint {
+  display: none; position: fixed; inset: 12px; z-index: 100;
+  align-items: center; justify-content: center;
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+  border: 2.5px dashed var(--accent); border-radius: var(--r-lg);
+  backdrop-filter: blur(2px);
+}
+#dropHint span { font-size: 20px; font-weight: 650; color: var(--accent-strong); background: var(--surface); padding: 14px 26px; border-radius: 999px; box-shadow: var(--shadow-lg); }
+#dropHint.active { display: flex; }
+
+/* ---------- toasts ---------- */
+#toasts { position: fixed; bottom: 18px; right: 18px; z-index: 200; display: flex; flex-direction: column; gap: 9px; max-width: min(90vw, 380px); }
+.toast { padding: 12px 16px; border-radius: var(--r-md); font-size: 13.5px; color: var(--ink);
+  background: var(--elevated); border: 1px solid var(--hair-strong); box-shadow: var(--shadow-lg);
+  border-left: 3px solid var(--accent); animation: toast-in .18s ease; }
+.toast.warn { border-left-color: #b7791f; }
+.toast.info { border-left-color: var(--accent); }
+@keyframes toast-in { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
+
+/* ---------- congrats overlay (shown when a folder is fully processed) ---------- */
+/* Higher than .modal-overlay (300) so it always wins if a utility modal
+   (iNaturalist / Navigate & act) happens to still be open when this fires —
+   belt-and-suspenders alongside closeAllModals() in showCongrats(). */
+.congrats-overlay {
+  position: fixed; inset: 0; z-index: 320; display: flex; align-items: center; justify-content: center;
+  background: color-mix(in srgb, var(--ink) 45%, transparent);
+  backdrop-filter: blur(3px);
+  padding: 20px;
+}
+/* The [hidden] attribute's default `display:none` is only a normal-priority
+   UA rule, so it's easily beaten by our own `display: flex` above at equal
+   specificity — this override restores correct hiding. */
+.congrats-overlay[hidden] { display: none; }
+.congrats-card {
+  width: min(92vw, 420px); text-align: center;
+  background: var(--surface); border: 1px solid var(--hair);
+  border-radius: var(--r-lg); box-shadow: var(--shadow-lg);
+  padding: 32px 28px 28px;
+  animation: congrats-in .28s cubic-bezier(.2, .9, .3, 1.2);
+}
+.congrats-badge {
+  width: 56px; height: 56px; margin: 0 auto 18px; border-radius: 50%;
+  display: grid; place-items: center;
+  background: linear-gradient(160deg, var(--accent), var(--accent-strong));
+  color: var(--accent-ink); box-shadow: var(--shadow-md);
+}
+.congrats-badge svg { width: 28px; height: 28px; }
+.congrats-card h2 { font-size: 21px; letter-spacing: -0.01em; }
+.congrats-sub { color: var(--muted); font-size: 14px; margin: 8px 0 22px; line-height: 1.5; }
+.congrats-stats {
+  display: grid; grid-template-columns: repeat(auto-fit, minmax(90px, 1fr));
+  gap: 10px; margin-bottom: 24px;
+}
+.congrats-stat {
+  padding: 12px 8px; border-radius: var(--r-md);
+  background: var(--ground); border: 1px solid var(--hair);
+}
+.congrats-num {
+  font-size: 22px; font-weight: 700; color: var(--accent-strong);
+  font-variant-numeric: tabular-nums; letter-spacing: -0.02em;
+}
+.congrats-label { font-size: 11px; color: var(--muted); margin-top: 3px; letter-spacing: 0.01em; }
+@keyframes congrats-in { from { opacity: 0; transform: scale(.94) translateY(6px); } to { opacity: 1; transform: none; } }
+
+/* ---------- responsive ---------- */
+/* Desktop: a fixed-height app shell — the page never scrolls, each column
+   scrolls internally, so the sidebar's progress footer is always visible. */
+@media (min-width: 901px) {
+  html, body { height: 100%; }
+  body { display: flex; flex-direction: column; overflow: hidden; }
+  .appbar, .warn-banner { flex: none; }
+  .shell { flex: 1 1 auto; min-height: 0; overflow: hidden; align-items: stretch; }
+  .panel { height: 100%; min-height: 0; }
+  .stage-col { height: 100%; min-height: 0; overflow-y: auto; }
+}
+
+/* Mobile / narrow: normal document flow, single column. */
+@media (max-width: 900px) {
+  .shell { grid-template-columns: 1fr; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  * { transition: none !important; animation: none !important; }
+}

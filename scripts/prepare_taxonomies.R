@@ -1,0 +1,88 @@
+# ------------------------------------------------------------------
+# Harmonize fauna/flora reference lists (heugi & plants checklist)
+# and export the result to Excel
+# ------------------------------------------------------------------
+
+library(tidyverse)
+library(openxlsx)
+
+# When the same taxon+family appears twice and only one row has a native
+# value filled in (the other is NA), keep the known value instead of the NA.
+first_non_na <- function(x) {
+  x <- x[!is.na(x)]
+  if (length(x) == 0) NA_character_ else x[1]
+}
+
+# --- Heugi (fauna indicativa) -----------------------------------------
+
+heugi_raw <- read.xlsx("/Users/marco/GitHub/tagit/data/fauna_indicativa_heusch_v3.xlsx", sheet = "data")
+names(heugi_raw) <- make.unique(names(heugi_raw))  # sheet has duplicate headers (Quelle, Wert, ...) - dplyr needs unique names to work with the data at all
+
+heugi <- heugi_raw %>%
+  mutate(
+    taxon  = if_else(is.na(Gattung) | is.na(Art), NA_character_, paste(Gattung, Art)),
+    family = Familie,
+    native = if_else(einheimisch.in.der.Schweiz == 0, "CH_NON_NATIVE_SPECIES", "CH_NATIVE")
+  ) %>%
+  select(taxon, family, native) %>%
+  group_by(taxon, family) %>%
+  summarise(native = first_non_na(native), .groups = "drop")
+
+# --- Plants (Checklist 2017) -------------------------------------------
+
+# Strip author citations from a taxon name.
+# Keeps "Genus species", or "Genus species subsp. epithet" when the
+# third word is "subsp." (e.g. "Rosa canina L." -> "Rosa canina",
+# "Rosa canina subsp. dumetorum (Thuill.) Ces." -> "Rosa canina subsp. dumetorum")
+clean_taxon_name <- function(taxonname) {
+  words <- str_split(str_squish(taxonname), "\\s+")
+  map_chr(words, function(w) {
+    if (all(is.na(w))) return(NA_character_)
+    n_keep <- if (length(w) >= 3 && w[3] == "subsp.") 4 else 2
+    paste(w[seq_len(min(n_keep, length(w)))], collapse = " ")
+  })
+}
+
+# Checklist status codes -> native scheme aligned with heugi
+#   I   Indigen                  -> CH_NATIVE
+#   A   Archeophyt (< 1500)      -> CH_ARCHEOPHYTE
+#   AC  Cultivated archeophyte   -> CH_ARCHEOPHYTE
+#   N   Neophyt (> 1500)         -> CH_NON_NATIVE_SPECIES
+#   NC  Cultivated neophyte      -> CH_NON_NATIVE_SPECIES
+#   ni  European neo-indigenous  -> CH_NON_NATIVE_SPECIES
+# NOTE: I assumed the status column is called "Status" - rename below
+# if it's called something else in your file.
+
+plants_raw <- read.xlsx("/Users/marco/GitHub/tagit/data/Checklist_2017_simple_version_20230503.xlsx", sheet = "data")
+names(plants_raw) <- make.unique(names(plants_raw))  # guard against duplicate headers, same issue as heugi
+
+# Run this once to find the real name of the status column, then replace
+# "Status" below with whatever it's actually called (e.g. "Status.1"):
+# names(plants_raw)
+
+plants <- plants_raw %>%
+  mutate(
+    taxon  = clean_taxon_name(Taxonname),
+    family = Familie,
+    native = case_when(
+      Indigenat.CH == "I"                       ~ "CH_NATIVE",
+      Indigenat.CH %in% c("A", "AC")            ~ "CH_ARCHEOPHYTE",
+      Indigenat.CH %in% c("N", "NC", "ni")      ~ "CH_NON_NATIVE_SPECIES",
+      TRUE                                 ~ NA_character_
+    )
+  ) %>%
+  select(taxon, family, native) %>%
+  group_by(taxon, family) %>%
+  summarise(native = first_non_na(native), .groups = "drop")
+
+# --- Export --------------------------------------------------------------
+
+write.xlsx(
+  plants,
+  file = "/Users/marco/GitHub/tagit/docs/taxonomies/taxonomy_Plants_InfoFlora_Checklist_2017.xlsx"
+)
+
+write.xlsx(
+  heugi,
+  file = "/Users/marco/GitHub/tagit/docs/taxonomies/taxonomy_Grassshoppers_FaunaIndicativa_v3.xlsx"
+)

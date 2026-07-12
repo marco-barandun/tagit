@@ -1,0 +1,336 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>tagit — caption plant &amp; animal photos in your browser</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Cpath d='M25 6C13 6 7 13 7 22c0 1 0 2 .3 3C10 18 16 14 22 12c-5 3-9 7-11 14 10 1 16-6 16-16 0-2 0-3-2-4z' fill='%232f6b47'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="styles.css?v=12">
+  <script>
+    // Set theme before first paint to avoid a flash.
+    (() => { try { const t = localStorage.getItem("tagit.theme"); if (t) document.documentElement.setAttribute("data-theme", t); } catch {} })();
+  </script>
+  <!-- read metadata (EXIF/GPS/XMP/IPTC) and write EXIF, all client-side.
+       Vendored locally so the tool works fully offline (no CDN dependency). -->
+  <script src="vendor/exifr.umd.js"></script>
+  <script src="vendor/piexif.js"></script>
+  <script src="vendor/xlsx.mini.js"></script>
+</head>
+<body>
+  <div id="dropHint"><span>Release to load JPEGs</span></div>
+  <div id="toasts"></div>
+
+  <div id="congratsOverlay" class="congrats-overlay" hidden>
+    <div class="congrats-card" role="dialog" aria-modal="true" aria-labelledby="congratsTitle">
+      <div class="congrats-badge">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12.5l4.5 4.5L19 7" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      </div>
+      <h2 id="congratsTitle">Folder complete</h2>
+      <p id="congratsSub" class="congrats-sub"></p>
+      <div id="congratsStats" class="congrats-stats"></div>
+      <button id="congratsCloseBtn" class="btn btn-primary full">Keep going</button>
+    </div>
+  </div>
+
+  <div id="inatModal" class="modal-overlay" hidden>
+    <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="inatModalTitle">
+      <div class="modal-header">
+        <h3 id="inatModalTitle">iNaturalist</h3>
+        <button type="button" class="modal-close" data-close="inatModal" aria-label="Close">×</button>
+      </div>
+      <div class="fold-sec-body">
+        <button id="inatAskBtn" class="btn btn-inat full">
+          <svg viewBox="0 0 24 24" class="ic" aria-hidden="true"><circle cx="12" cy="12" r="9" fill="none" stroke="currentColor" stroke-width="1.7"/><path d="M8 13c1.5 2 6.5 2 8-4-4 1.5-6.5 1-8 4z" fill="currentColor"/></svg>
+          Identify with iNaturalist
+        </button>
+        <div id="inatResults" class="btn-area"></div>
+        <label class="field-label" for="inatGeo">On iNaturalist, share coordinates as</label>
+        <select id="inatGeo" class="input">
+          <option value="open">Open — exact coordinates public</option>
+          <option value="obscured">Obscured — location shown coarsely</option>
+          <option value="private">Private — location hidden from everyone</option>
+        </select>
+        <button id="inatObsBtn" class="btn btn-inat full">Post observation to iNaturalist</button>
+        <button id="inatSyncBtn" class="btn full">Sync IDs from iNat</button>
+        <div id="inatHint" class="hint"></div>
+      </div>
+    </div>
+  </div>
+
+  <div id="navModal" class="modal-overlay" hidden>
+    <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="navModalTitle">
+      <div class="modal-header">
+        <h3 id="navModalTitle">Navigate &amp; act</h3>
+        <button type="button" class="modal-close" data-close="navModal" aria-label="Close">×</button>
+      </div>
+      <div class="fold-sec-body">
+        <label class="field-label" for="keywordsBox">Extra keywords (not in caption)</label>
+        <input id="keywordsBox" class="input" autocomplete="off" placeholder="e.g. habitat, roadside — comma separated">
+
+        <div class="grid2">
+          <button id="prevBtn" class="btn"><span class="ic-t">←</span> Previous</button>
+          <button id="nextBtn" class="btn">Next <span class="ic-t">→</span></button>
+          <button id="rotateBtn" class="btn">Rotate 90° <kbd>r</kbd></button>
+          <button id="undoBtn" class="btn">Undo <kbd>u</kbd></button>
+          <button id="skipBtn" class="btn">Skip</button>
+          <button id="undetBtn" class="btn">Can’t determine <kbd>i</kbd></button>
+        </div>
+        <button id="deleteBtn" class="btn btn-danger full">Delete <span class="sub">→ _deleted</span></button>
+
+        <div class="field-label">Show</div>
+        <div id="statusFilter" class="segmented">
+          <label class="seg"><input type="checkbox" value="untouched"><span>Untouched</span></label>
+          <label class="seg"><input type="checkbox" value="labelled"><span>Labelled</span></label>
+          <label class="seg"><input type="checkbox" value="skipped"><span>Skipped</span></label>
+          <label class="seg"><input type="checkbox" value="undetermined"><span>Undetermined</span></label>
+          <label class="seg"><input type="checkbox" value="deleted"><span>Deleted</span></label>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div id="mapModal" class="modal-overlay" hidden>
+    <div class="modal-card modal-card-wide" role="dialog" aria-modal="true" aria-labelledby="mapModalTitle">
+      <div class="modal-header">
+        <h3 id="mapModalTitle">Location</h3>
+        <button type="button" class="modal-close" data-close="mapModal" aria-label="Close">×</button>
+      </div>
+      <div class="map-modal-body">
+        <iframe id="mapFrameLarge" title="Photo location on the map (large)" loading="lazy" referrerpolicy="no-referrer"></iframe>
+        <div class="map-marker" aria-hidden="true"></div>
+      </div>
+    </div>
+  </div>
+
+  <div id="setupModal" class="modal-overlay" hidden>
+    <div class="modal-card modal-card-wide" role="dialog" aria-modal="true" aria-labelledby="setupModalTitle">
+      <div class="modal-header">
+        <h3 id="setupModalTitle">Setup &amp; tools</h3>
+        <button type="button" class="modal-close" data-close="setupModal" aria-label="Close">×</button>
+      </div>
+      <div class="fold-body">
+        <h4>Taxonomies <span id="taxonomyStatus" class="tag"></span></h4>
+        <p class="hint">Tick one or more taxonomies to use together. Bundled files live in <code>docs/taxonomies/</code> (columns <code>taxon</code>, <code>family</code>, plus any attributes). They power the searchable list, family fill-in and keywords.</p>
+        <div id="taxonomyList" class="tx-list"></div>
+        <button id="uploadTaxonomyBtn" class="btn btn-ghost full">Upload a taxonomy…</button>
+        <input type="file" id="taxonomyFile" accept=".csv,.tsv,.txt,.xlsx,.xls" hidden>
+
+        <div id="taxonomyMapper" class="mapper" hidden>
+          <div class="field-label">Name</div>
+          <input id="taxNameInput" class="input" placeholder="My taxonomy">
+          <div class="settings-grid">
+            <label>Taxon column<select id="taxColSelect" class="input small"></select></label>
+            <label>Family column<select id="famColSelect" class="input small"></select></label>
+          </div>
+          <div class="grid2" style="margin-top:10px">
+            <button id="taxAddBtn" class="btn btn-primary">Add taxonomy</button>
+            <button id="taxCancelBtn" class="btn btn-ghost">Cancel</button>
+          </div>
+        </div>
+
+        <h4>iNaturalist <span id="inatStatus" class="tag"></span></h4>
+        <p class="hint">Paste an API token to enable AI photo identification. It's used only from your browser to call iNaturalist and expires after ~24&nbsp;hours.
+          <a href="https://www.inaturalist.org/users/api_token" target="_blank" rel="noopener">Get a token ↗</a></p>
+        <div class="inat-token-row">
+          <input type="password" id="inatToken" class="input" placeholder="Paste iNaturalist API token…" autocomplete="off">
+          <button id="inatCheckBtn" class="btn btn-ghost">Check</button>
+        </div>
+
+        <h4>Observation log <span id="obsStatus" class="tag"></span></h4>
+        <p class="hint">CSV/TSV with a taxon column and a date column (<code>date_start</code>/<code>datetime</code>). Powers the time-based suggestions.</p>
+        <input type="file" id="obsFile" accept=".csv,.tsv,.txt">
+
+        <h4>Watermark</h4>
+        <label class="check"><input type="checkbox" id="wmEnable"><span>Burn a watermark into saved photos</span></label>
+        <input id="wmText" class="input" autocomplete="off" placeholder="© Your name, 2026" style="margin-top:6px">
+        <div class="settings-grid">
+          <label>Position
+            <select id="wmPosition" class="input small">
+              <option value="br">Bottom right</option>
+              <option value="bl">Bottom left</option>
+              <option value="tr">Top right</option>
+              <option value="tl">Top left</option>
+            </select>
+          </label>
+          <label>Font
+            <select id="wmFont" class="input small">
+              <option value="sans">Sans-serif</option>
+              <option value="serif">Serif</option>
+              <option value="mono">Monospace</option>
+            </select>
+          </label>
+          <label>Size (% of shorter side)
+            <input type="number" id="wmSize" class="input small" min="1" max="10" step="0.5">
+          </label>
+        </div>
+
+        <h4>Settings</h4>
+        <div class="settings-grid">
+          <label>Suggestion window (± min)<input type="number" id="windowMin" class="input small" min="0" step="1"></label>
+          <label>Camera clock offset (h)<input type="number" id="clockOffset" class="input small" step="0.5"></label>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div id="helpModal" class="modal-overlay" hidden>
+    <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="helpModalTitle">
+      <div class="modal-header">
+        <h3 id="helpModalTitle">How it works &amp; limits</h3>
+        <button type="button" class="modal-close" data-close="helpModal" aria-label="Close">×</button>
+      </div>
+      <div class="fold-body hint">
+        <ul>
+          <li>Captions are written into the three fields Apple Photos reads: IPTC Caption-Abstract, XMP dc:description, EXIF ImageDescription.</li>
+          <li>Save → <code>_labelled</code>; Skip → <code>_skipped</code>; Can’t determine → <code>_undetermined</code> (“Indet.”); Delete → <code>_deleted</code>.</li>
+          <li>Full folder editing works in Chrome/Edge/Brave/Arc. Safari/Firefox: drag in and download copies.</li>
+          <li>This build handles <strong>JPEG</strong> only — RAW/HEIC need the desktop version.</li>
+          <li><strong>iNaturalist</strong>: paste a token under Setup &amp; tools, then click <em>Identify with iNaturalist</em> to get AI suggestions for the current photo (uses its GPS &amp; date).</li>
+          <li><strong>Map</strong>: photos with GPS get a <em>Show map</em> control in the photo info; it appears as a small preview in the photo's bottom-right corner — click it to enlarge.</li>
+          <li>Keys: ← → navigate · 1–9 pick a suggestion · r rotate · c copy last · u undo · i can’t-determine · s same as previous · Delete discard.</li>
+        </ul>
+      </div>
+    </div>
+  </div>
+
+  <!-- ============================ app bar ============================ -->
+  <header class="appbar">
+    <div class="brand">
+      <svg class="leaf" viewBox="0 0 32 32" aria-hidden="true"><path d="M25 6C13 6 7 13 7 22c0 1 0 2 .3 3C10 18 16 14 22 12c-5 3-9 7-11 14 10 1 16-6 16-16 0-2 0-3-2-4z"/></svg>
+      <span class="wordmark">tagit</span>
+      <span class="privacy" title="Photos are processed on your machine and never uploaded">
+        <span class="dot"></span> Local only
+      </span>
+      <span id="folderName" class="folder-inline">No folder open</span>
+    </div>
+    <div class="appbar-actions">
+      <button id="reopenBtn" class="btn btn-ghost" style="display:none"></button>
+      <button id="setupBtn" class="btn btn-ghost" title="Set up taxonomies, iNaturalist, watermark…">
+        <svg viewBox="0 0 24 24" class="ic" aria-hidden="true"><circle cx="12" cy="12" r="3" fill="none" stroke="currentColor" stroke-width="1.7"/><path d="M19.4 13a7.4 7.4 0 0 0 0-2l2-1.5-2-3.4-2.4.8a7.6 7.6 0 0 0-1.7-1L14.8 3H9.2l-.5 2.9a7.6 7.6 0 0 0-1.7 1l-2.4-.8-2 3.4L4.6 11a7.4 7.4 0 0 0 0 2l-2 1.5 2 3.4 2.4-.8a7.6 7.6 0 0 0 1.7 1l.5 2.9h5.6l.5-2.9a7.6 7.6 0 0 0 1.7-1l2.4.8 2-3.4z" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/></svg>
+        Setup
+      </button>
+      <button id="helpBtn" class="btn btn-ghost" title="How it works &amp; limits">
+        <svg viewBox="0 0 24 24" class="ic" aria-hidden="true"><circle cx="12" cy="12" r="9" fill="none" stroke="currentColor" stroke-width="1.7"/><path d="M9.4 9.2a2.6 2.6 0 1 1 3.6 2.4c-.8.35-1.3 1-1.3 1.9v.4" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/><circle cx="12" cy="16.9" r="1" fill="currentColor"/></svg>
+        Help
+      </button>
+      <button id="infoToggleBtn" class="btn btn-icon" title="Show/hide photo info (filename, status, date, time, caption, keywords)" aria-label="Toggle photo info" aria-pressed="true">
+        <svg viewBox="0 0 24 24" class="ic" aria-hidden="true"><circle cx="12" cy="12" r="9" fill="none" stroke="currentColor" stroke-width="1.7"/><path d="M12 11v5.5" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"/><circle cx="12" cy="7.8" r="1.15" fill="currentColor"/></svg>
+      </button>
+      <button id="openFolder" class="btn btn-primary">
+        <svg viewBox="0 0 24 24" class="ic" aria-hidden="true"><path d="M3 6a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" fill="none" stroke="currentColor" stroke-width="1.7"/></svg>
+        Open folder
+      </button>
+      <button id="themeToggle" class="btn btn-icon" title="Switch light / dark" aria-label="Switch theme">
+        <svg viewBox="0 0 24 24" class="ic" aria-hidden="true"><path class="sun" d="M12 4v2M12 18v2M4 12H2M22 12h-2M5.6 5.6 4.2 4.2M19.8 19.8l-1.4-1.4M18.4 5.6l1.4-1.4M4.2 19.8l1.4-1.4" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/><circle class="sun" cx="12" cy="12" r="4" fill="none" stroke="currentColor" stroke-width="1.7"/><path class="moon" d="M20 14.5A8 8 0 0 1 9.5 4a8 8 0 1 0 10.5 10.5z" fill="currentColor"/></svg>
+      </button>
+    </div>
+  </header>
+
+  <div id="noFsWarning" class="warn-banner" style="display:none">
+    This browser can’t open a folder for in-place editing. You can still
+    <strong>drag photos in</strong> and download captioned copies. For the full
+    folder workflow, use <strong>Chrome, Edge, Brave, or Arc</strong>.
+  </div>
+
+  <!-- ============================ workspace ============================ -->
+  <main class="shell">
+    <!-- ---------- control panel ---------- -->
+    <aside class="panel">
+      <!-- Pinned top: always visible, even while the list below scrolls.
+           Determination (pick the taxon) and the caption it composes are one
+           merged, always-visible section. -->
+      <div class="panel-head">
+        <div class="eyebrow">Determination</div>
+        <!-- Selected taxa aren't shown here — the caption below (and the photo
+             overlay) already reflects them, so a chip list would be redundant. -->
+        <div class="ac-wrap">
+          <input id="taxonInput" class="input" autocomplete="off"
+                 placeholder="Type to search or add a name…">
+          <div id="acMenu" class="ac-menu"></div>
+          <!-- Family prompt for a brand-new taxon — floats over the panel
+               instead of pushing the rest of the layout down. -->
+          <div id="familyHolder" class="family-popover"></div>
+        </div>
+        <label class="check">
+          <input type="checkbox" id="cfBox"><span>Uncertain determination (cf.)</span>
+        </label>
+        <label class="field-label">Recently used</label>
+        <div id="recent" class="btn-area recent"></div>
+        <label class="field-label" for="captionBox">Caption to save</label>
+        <input id="captionBox" class="input mono" placeholder="Taxon (Family)">
+        <button id="saveBtn" class="btn btn-primary full">
+          <svg viewBox="0 0 24 24" class="ic" aria-hidden="true"><path d="M5 13l4 4L19 7" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+          Save &amp; next
+        </button>
+        <button id="copyLastBtn" class="btn btn-ghost full">Copy last caption <kbd>c</kbd></button>
+      </div>
+
+     <div class="panel-scroll">
+      <section class="sec" id="suggSection" hidden>
+        <div class="eyebrow">Suggestions for this time</div>
+        <div id="suggestions" class="btn-area"></div>
+      </section>
+
+      <button type="button" class="row-btn" id="inatModalBtn">
+        <span>iNaturalist</span>
+        <svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M9 4H4v5M15 4h5v5M9 20H4v-5M15 20h5v-5" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      </button>
+
+      <button type="button" class="row-btn" id="navModalBtn">
+        <span>Navigate &amp; act</span>
+        <svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M9 4H4v5M15 4h5v5M9 20H4v-5M15 20h5v-5" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      </button>
+     </div><!-- /.panel-scroll -->
+
+      <div class="panel-foot">
+        <div class="progress"><div id="barDone" class="bar-done"></div><div id="barUndet" class="bar-undet"></div></div>
+        <div id="progressText" class="progress-text"></div>
+      </div>
+    </aside>
+
+    <!-- ---------- photo stage ---------- -->
+    <section class="stage-col">
+      <div class="stage">
+        <div id="busy" class="busy" style="display:none"></div>
+        <img id="photo" src="" alt="current photo">
+        <div class="empty">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="5" width="18" height="14" rx="2" fill="none" stroke="currentColor" stroke-width="1.4"/><circle cx="8.5" cy="10" r="1.6" fill="currentColor"/><path d="M4 17l5-5 4 4 3-3 4 4" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg>
+          <p>Open a folder of JPEGs, or drag them onto this page, to begin.</p>
+          <button id="emptyOpen" class="btn btn-primary">
+            <svg viewBox="0 0 24 24" class="ic" aria-hidden="true"><path d="M3 6a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" fill="none" stroke="currentColor" stroke-width="1.7"/></svg>
+            Open folder
+          </button>
+        </div>
+        <!-- Everything about the current photo — filename, status, date, time,
+             locality, caption, keywords, iNat link, map toggle — overlays the
+             bottom of the photo itself, so nothing needs scrolling to reach. -->
+        <div id="meta" class="meta-overlay" hidden></div>
+        <!-- Bottom-right corner stack: small map preview (click to enlarge)
+             with the status badge underneath it. -->
+        <div class="corner-stack">
+          <div id="mapCorner" class="map-corner" hidden role="button" tabindex="0" aria-label="Enlarge map">
+            <iframe id="mapCornerFrame" title="Photo location on the map" loading="lazy" referrerpolicy="no-referrer" tabindex="-1"></iframe>
+            <div class="map-marker" aria-hidden="true"></div>
+          </div>
+          <span id="statusCorner" class="meta-status-badge" hidden></span>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <script src="metadata.js?v=12"></script>
+  <script src="app.js?v=12"></script>
+  <script>
+    (() => {
+      const root = document.documentElement;
+      const cur = () => root.getAttribute("data-theme") ||
+        (matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light");
+      document.getElementById("themeToggle").addEventListener("click", () => {
+        const next = cur() === "dark" ? "light" : "dark";
+        root.setAttribute("data-theme", next);
+        try { localStorage.setItem("tagit.theme", next); } catch {}
+      });
+    })();
+  </script>
+</body>
+</html>
