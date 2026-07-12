@@ -60,8 +60,9 @@ discard (only when no taxon is selected).
   needs the File System Access API — **Chrome, Edge, Brave, or Arc**. In Safari
   and Firefox you can still drag photos in and download captioned copies, but
   files aren't organised in place.
-- **iNaturalist** (paste an API token under *Setup & tools*): *Identify* gives AI
-  suggestions; *Create observation* posts the photo to your account and links the
+- **iNaturalist** (paste an API token in the *iNaturalist* tab): *Identify* gives AI
+  suggestions with confidence scores, editable right there as the caption to save;
+  *Create observation* posts the photo to your account and links the
   observation URL into the file; *Sync IDs from iNat* re-checks every linked photo
   and updates captions that have become research grade with a different consensus
   taxon. (The **GBIF species-list builder** from the R version isn't ported.)

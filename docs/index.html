@@ -6,6 +6,7 @@
   <title>tagit — caption plant &amp; animal photos in your browser</title>
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Cpath d='M25 6C13 6 7 13 7 22c0 1 0 2 .3 3C10 18 16 14 22 12c-5 3-9 7-11 14 10 1 16-6 16-16 0-2 0-3-2-4z' fill='%232f6b47'/%3E%3C/svg%3E">
   <link rel="stylesheet" href="styles.css?v=12">
+  <link rel="stylesheet" href="vendor/leaflet.css">
   <script>
     // Set theme before first paint to avoid a flash.
     (() => { try { const t = localStorage.getItem("tagit.theme"); if (t) document.documentElement.setAttribute("data-theme", t); } catch {} })();
@@ -15,6 +16,9 @@
   <script src="vendor/exifr.umd.js"></script>
   <script src="vendor/piexif.js"></script>
   <script src="vendor/xlsx.mini.js"></script>
+  <!-- Leaflet renders the location map ourselves (instead of an OSM iframe
+       embed) so the marker color is under our control. -->
+  <script src="vendor/leaflet.js"></script>
 </head>
 <body>
   <div id="dropHint"><span>Release to load JPEGs</span></div>
@@ -33,26 +37,95 @@
   </div>
 
   <div id="inatModal" class="modal-overlay" hidden>
-    <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="inatModalTitle">
+    <div class="modal-card modal-card-photo" role="dialog" aria-modal="true" aria-labelledby="inatModalTitle">
       <div class="modal-header">
         <h3 id="inatModalTitle">iNaturalist</h3>
         <button type="button" class="modal-close" data-close="inatModal" aria-label="Close">×</button>
       </div>
+      <div class="inat-split">
+        <div class="inat-controls fold-sec-body">
+          <button id="inatAskBtn" class="btn btn-inat full">
+            <svg viewBox="0 0 24 24" class="ic" aria-hidden="true"><circle cx="12" cy="12" r="9" fill="none" stroke="currentColor" stroke-width="1.7"/><path d="M8 13c1.5 2 6.5 2 8-4-4 1.5-6.5 1-8 4z" fill="currentColor"/></svg>
+            Identify with iNaturalist
+          </button>
+          <div id="inatResults" class="btn-area"></div>
+          <label class="field-label" for="inatCaptionBox">Caption to save</label>
+          <input id="inatCaptionBox" class="input mono" placeholder="Taxon (Family)">
+          <button id="inatSaveBtn" class="btn btn-primary full">Save &amp; next</button>
+          <label class="field-label" for="inatGeo">On iNaturalist, share coordinates as</label>
+          <select id="inatGeo" class="input">
+            <option value="open">Open — exact coordinates public</option>
+            <option value="obscured">Obscured — location shown coarsely</option>
+            <option value="private">Private — location hidden from everyone</option>
+          </select>
+          <button id="inatObsBtn" class="btn btn-inat full">Post observation to iNaturalist</button>
+          <button id="inatSyncBtn" class="btn full">Sync IDs from iNat</button>
+          <div id="inatHint" class="hint"></div>
+
+          <label class="field-label">Tagging old photos?</label>
+          <button id="inatScreenBtn" class="btn btn-inat full">Screen collection for already-posted photos</button>
+          <p class="hint" style="margin:0">Checks your iNaturalist account near every photo's date/time (any status — untouched, labelled, skipped, deleted…), compares the images, and lets you confirm matches.</p>
+
+          <label class="field-label">API token <span id="inatStatus" class="tag"></span></label>
+          <p class="hint">Used only from your browser to call iNaturalist; expires after ~24&nbsp;hours.
+            <a href="https://www.inaturalist.org/users/api_token" target="_blank" rel="noopener">Get a token ↗</a></p>
+          <div class="inat-token-row">
+            <input type="password" id="inatToken" class="input" placeholder="Paste iNaturalist API token…" autocomplete="off">
+            <button id="inatCheckBtn" class="btn btn-ghost">Check</button>
+          </div>
+        </div>
+        <div class="inat-stage">
+          <img id="inatPhotoImg" alt="Current photo">
+          <button type="button" id="inatInfoToggleBtn" class="inat-info-btn" title="Show/hide photo info" aria-label="Toggle photo info" aria-pressed="true">
+            <svg viewBox="0 0 24 24" class="ic" aria-hidden="true"><circle cx="12" cy="12" r="9" fill="none" stroke="currentColor" stroke-width="1.7"/><path d="M12 11v5.5" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"/><circle cx="12" cy="7.8" r="1.15" fill="currentColor"/></svg>
+          </button>
+          <div id="inatPhotoMeta" class="meta-overlay" hidden></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div id="inatScreenConfigModal" class="modal-overlay" hidden>
+    <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="screenConfigTitle">
+      <div class="modal-header">
+        <h3 id="screenConfigTitle">Screen for already-posted photos</h3>
+        <button type="button" class="modal-close" data-close="inatScreenConfigModal" aria-label="Close">×</button>
+      </div>
       <div class="fold-sec-body">
-        <button id="inatAskBtn" class="btn btn-inat full">
-          <svg viewBox="0 0 24 24" class="ic" aria-hidden="true"><circle cx="12" cy="12" r="9" fill="none" stroke="currentColor" stroke-width="1.7"/><path d="M8 13c1.5 2 6.5 2 8-4-4 1.5-6.5 1-8 4z" fill="currentColor"/></svg>
-          Identify with iNaturalist
-        </button>
-        <div id="inatResults" class="btn-area"></div>
-        <label class="field-label" for="inatGeo">On iNaturalist, share coordinates as</label>
-        <select id="inatGeo" class="input">
-          <option value="open">Open — exact coordinates public</option>
-          <option value="obscured">Obscured — location shown coarsely</option>
-          <option value="private">Private — location hidden from everyone</option>
-        </select>
-        <button id="inatObsBtn" class="btn btn-inat full">Post observation to iNaturalist</button>
-        <button id="inatSyncBtn" class="btn full">Sync IDs from iNat</button>
-        <div id="inatHint" class="hint"></div>
+        <p class="hint">Looks through your iNaturalist observations for anything near each photo's date &amp; time — <strong>any status</strong>, including ones you've already labelled, skipped or deleted — then compares the images so you can confirm matches side-by-side. Confirmed matches are captioned, keyworded and linked automatically.</p>
+        <label class="field-label" for="screenWindowMin">Match window (± minutes)</label>
+        <input type="number" id="screenWindowMin" class="input small" min="1" max="120" step="1" value="5">
+        <button id="screenStartBtn" class="btn btn-primary full">Start screening</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="inatMatchModal" class="modal-overlay" hidden>
+    <div class="modal-card modal-card-xwide" role="dialog" aria-modal="true" aria-labelledby="matchModalTitle">
+      <div class="modal-header">
+        <h3 id="matchModalTitle">Review possible matches</h3>
+        <button type="button" class="modal-close" data-close="inatMatchModal" aria-label="Close">×</button>
+      </div>
+      <div class="fold-sec-body">
+        <div id="matchProgress" class="hint"></div>
+        <div class="match-compare">
+          <div class="match-pane">
+            <div class="match-pane-label">Your photo</div>
+            <img id="matchLocalImg" alt="Local photo">
+            <div id="matchLocalMeta" class="match-meta"></div>
+          </div>
+          <div class="match-pane">
+            <div class="match-pane-label">iNaturalist</div>
+            <img id="matchInatImg" alt="iNaturalist photo">
+            <div id="matchInatMeta" class="match-meta"></div>
+          </div>
+        </div>
+        <div id="matchScoreBadge" class="match-score"></div>
+        <div class="grid2">
+          <button id="matchSameBtn" class="btn btn-primary">✓ Same — link &amp; label</button>
+          <button id="matchNotBtn" class="btn">Not a match</button>
+        </div>
+        <button id="matchSkipBtn" class="btn btn-ghost full">Skip this photo</button>
       </div>
     </div>
   </div>
@@ -96,8 +169,7 @@
         <button type="button" class="modal-close" data-close="mapModal" aria-label="Close">×</button>
       </div>
       <div class="map-modal-body">
-        <iframe id="mapFrameLarge" title="Photo location on the map (large)" loading="lazy" referrerpolicy="no-referrer"></iframe>
-        <div class="map-marker" aria-hidden="true"></div>
+        <div id="mapFrameLarge" role="img" aria-label="Photo location on the map (large)"></div>
       </div>
     </div>
   </div>
@@ -126,14 +198,6 @@
             <button id="taxAddBtn" class="btn btn-primary">Add taxonomy</button>
             <button id="taxCancelBtn" class="btn btn-ghost">Cancel</button>
           </div>
-        </div>
-
-        <h4>iNaturalist <span id="inatStatus" class="tag"></span></h4>
-        <p class="hint">Paste an API token to enable AI photo identification. It's used only from your browser to call iNaturalist and expires after ~24&nbsp;hours.
-          <a href="https://www.inaturalist.org/users/api_token" target="_blank" rel="noopener">Get a token ↗</a></p>
-        <div class="inat-token-row">
-          <input type="password" id="inatToken" class="input" placeholder="Paste iNaturalist API token…" autocomplete="off">
-          <button id="inatCheckBtn" class="btn btn-ghost">Check</button>
         </div>
 
         <h4>Observation log <span id="obsStatus" class="tag"></span></h4>
@@ -174,18 +238,26 @@
   </div>
 
   <div id="helpModal" class="modal-overlay" hidden>
-    <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="helpModalTitle">
+    <div class="modal-card modal-card-wide" role="dialog" aria-modal="true" aria-labelledby="helpModalTitle">
       <div class="modal-header">
         <h3 id="helpModalTitle">How it works &amp; limits</h3>
         <button type="button" class="modal-close" data-close="helpModal" aria-label="Close">×</button>
       </div>
-      <div class="fold-body hint">
-        <ul>
+      <div class="fold-body">
+        <div class="privacy-banner">
+          <span class="dot" aria-hidden="true"></span>
+          <div>
+            <strong>Everything happens on your computer.</strong>
+            <p>tagit runs entirely in this browser tab — there's no server behind it, no account, no analytics, no tracking. Your photos are never uploaded anywhere, and nothing about them or you is collected. The only network requests it ever makes are ones you explicitly ask for: loading map tiles to show a photo's location, or talking to iNaturalist if you paste in your own API token. Close this tab and nothing is sent or kept, aside from a few small preferences — your chosen taxonomy, theme, watermark settings — saved locally in this browser (never anywhere else).</p>
+          </div>
+        </div>
+        <h4>How it works</h4>
+        <ul class="hint">
           <li>Captions are written into the three fields Apple Photos reads: IPTC Caption-Abstract, XMP dc:description, EXIF ImageDescription.</li>
           <li>Save → <code>_labelled</code>; Skip → <code>_skipped</code>; Can’t determine → <code>_undetermined</code> (“Indet.”); Delete → <code>_deleted</code>.</li>
           <li>Full folder editing works in Chrome/Edge/Brave/Arc. Safari/Firefox: drag in and download copies.</li>
           <li>This build handles <strong>JPEG</strong> only — RAW/HEIC need the desktop version.</li>
-          <li><strong>iNaturalist</strong>: paste a token under Setup &amp; tools, then click <em>Identify with iNaturalist</em> to get AI suggestions for the current photo (uses its GPS &amp; date).</li>
+          <li><strong>iNaturalist</strong>: paste a token in the iNaturalist tab, then click <em>Identify with iNaturalist</em> to get AI suggestions (with confidence %) for the current photo (uses its GPS &amp; date).</li>
           <li><strong>Map</strong>: photos with GPS get a <em>Show map</em> control in the photo info; it appears as a small preview in the photo's bottom-right corner — click it to enlarge.</li>
           <li>Keys: ← → navigate · 1–9 pick a suggestion · r rotate · c copy last · u undo · i can’t-determine · s same as previous · Delete discard.</li>
         </ul>
@@ -309,8 +381,7 @@
              with the status badge underneath it. -->
         <div class="corner-stack">
           <div id="mapCorner" class="map-corner" hidden role="button" tabindex="0" aria-label="Enlarge map">
-            <iframe id="mapCornerFrame" title="Photo location on the map" loading="lazy" referrerpolicy="no-referrer" tabindex="-1"></iframe>
-            <div class="map-marker" aria-hidden="true"></div>
+            <div id="mapCornerFrame" role="img" aria-label="Photo location on the map"></div>
           </div>
           <span id="statusCorner" class="meta-status-badge" hidden></span>
         </div>

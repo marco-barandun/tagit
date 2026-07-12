@@ -292,6 +292,38 @@ kbd {
 .modal-card > .fold-sec-body,
 .modal-card > .fold-body { flex: 1 1 auto; min-height: 0; overflow-y: auto; }
 .modal-card-wide { width: min(94vw, 520px); }
+.modal-card-xwide { width: min(94vw, 640px); }
+/* As close to the main (non-modal) layout as a modal can get: a fixed-width
+   control column on the left, like the sidebar, and the photo filling the
+   rest — instead of a small thumbnail stacked above the controls. */
+.modal-card-photo { width: min(96vw, 1400px); max-height: min(94vh, 1000px); }
+.inat-split { display: flex; flex: 1 1 auto; min-height: 0; overflow: hidden; }
+.inat-controls.fold-sec-body {
+  flex: none; width: 360px; min-height: 0; overflow-y: auto;
+  border-right: 1px solid var(--hair);
+}
+
+/* iNaturalist match review — side-by-side compare */
+.match-compare { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+.match-pane { display: flex; flex-direction: column; gap: 6px; }
+.match-pane-label {
+  font-size: 11px; font-weight: 650; letter-spacing: 0.08em; text-transform: uppercase;
+  color: var(--faint);
+}
+.match-pane img {
+  width: 100%; aspect-ratio: 1; object-fit: cover; border-radius: var(--r-md);
+  border: 1px solid var(--hair); background: var(--ground);
+}
+.match-meta { font-family: var(--mono); font-size: 12px; color: var(--muted); line-height: 1.5; }
+.match-meta a { color: var(--accent-strong); }
+.match-score {
+  text-align: center; font-size: 13px; font-weight: 600;
+  padding: 7px; border-radius: var(--r-sm); margin: 2px 0 4px;
+}
+.match-score.high { background: var(--accent-soft); color: var(--accent-strong); }
+.match-score.medium { background: color-mix(in srgb, #b7791f 16%, transparent); color: #b7791f; }
+.match-score.low { background: var(--danger-soft); color: var(--danger); }
+.match-score.unknown { background: var(--ground); color: var(--muted); }
 
 .fold-sec-body { padding: 6px var(--pad) 20px; display: flex; flex-direction: column; gap: 12px; }
 /* The flex `gap` above is the single source of vertical rhythm in here — zero
@@ -367,19 +399,21 @@ select.input {
 .check { display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--muted); margin-top: 10px; cursor: pointer; }
 .check input { accent-color: var(--accent); width: 15px; height: 15px; }
 
-/* suggestion / recent pills — same compact chip style throughout; Suggestions
-   gets room for two rows, Recently used just one, to keep this area small. */
+/* suggestion / recent pills — same compact chip style throughout; both
+   Suggestions and Recently used get room for two rows to keep this area small. */
 .btn-area { display: flex; flex-wrap: wrap; gap: 6px; overflow-y: auto; }
 .chip-btn {
   font: inherit; font-size: 11px; padding: 3px 9px; line-height: 1.15;
   border: 1px solid var(--hair-strong); background: var(--ground); color: var(--ink);
   border-radius: 999px; cursor: pointer; transition: all .12s ease;
+  display: inline-flex; align-items: center; gap: 5px;
 }
 .chip-btn:hover { border-color: var(--accent); background: var(--accent-soft); color: var(--accent-strong); }
+.chip-score { opacity: .6; font-variant-numeric: tabular-nums; }
 .muted { color: var(--faint); font-size: 13px; font-style: italic; }
 
 #suggestions.btn-area { min-height: 24px; max-height: 58px; }
-.btn-area.recent { min-height: 24px; max-height: 28px; }
+.btn-area.recent { min-height: 24px; max-height: 58px; }
 
 /* autocomplete */
 .ac-wrap { position: relative; }
@@ -503,53 +537,70 @@ select.input {
 }
 .meta-map-btn:hover { background: rgba(255, 255, 255, 0.18); border-color: rgba(255, 255, 255, 0.55); }
 
+/* The photo being identified, shown zoomable inside the iNaturalist tab —
+   the modal backdrop otherwise hides the main stage completely, so there
+   was no way to actually look at the photo while picking a suggestion.
+   Fills the rest of the modal next to .inat-controls, like the main
+   (non-modal) photo stage fills the rest of the window next to the sidebar. */
+.inat-stage {
+  position: relative; overflow: hidden;
+  background: var(--ground); display: flex; align-items: center; justify-content: center;
+  flex: 1 1 auto; min-width: 0;
+}
+.inat-stage img {
+  max-width: 100%; max-height: 100%; object-fit: contain; cursor: zoom-in;
+}
+.inat-stage .meta-overlay { font-size: 11.5px; max-height: 70%; }
+.inat-info-btn {
+  position: absolute; top: 8px; right: 8px; z-index: 4;
+  width: 30px; height: 30px; border-radius: 999px; padding: 0;
+  display: flex; align-items: center; justify-content: center;
+  background: rgba(10, 14, 11, 0.55); border: 1px solid rgba(255, 255, 255, 0.35);
+  color: #f1f3ef; cursor: pointer; transition: background .12s ease;
+}
+.inat-info-btn:hover { background: rgba(10, 14, 11, 0.75); }
+.inat-info-btn .ic { width: 16px; height: 16px; }
+
 /* Bottom-right corner stack: map preview on top, status badge underneath
    (or the badge alone, in the map's spot, when there's no GPS). */
 .corner-stack {
   position: absolute; right: 12px; bottom: 12px; z-index: 3;
   display: flex; flex-direction: column; align-items: flex-end; gap: 8px;
 }
-/* Small map preview; click to enlarge (opens #mapModal with a closer zoom). */
+/* Small map preview; click to enlarge (opens #mapModal with a closer zoom).
+   A real (same-origin) Leaflet map, not an OSM iframe embed — that's what
+   lets the location marker be any color we want (see redMarker() in app.js)
+   instead of OSM's fixed default pin. Interaction is disabled in JS (this is
+   a thumbnail, not something to pan around in at 148x108), so no zoom
+   control or attribution chrome is needed to fight for space here. */
 .map-corner {
   width: 148px; height: 108px; border-radius: 8px; overflow: hidden;
   border: 2px solid rgba(255, 255, 255, 0.85); box-shadow: 0 6px 18px rgba(0, 0, 0, 0.45);
   cursor: zoom-in; transition: transform .15s ease, box-shadow .15s ease;
+  background: var(--ground);
 }
 .map-corner:hover { transform: scale(1.04); box-shadow: 0 8px 22px rgba(0, 0, 0, 0.55); }
 .map-corner:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .map-corner[hidden] { display: none; }
-/* OpenStreetMap's embed always includes its attribution strip + zoom control,
-   which at this preview's true size would dominate the whole box. Rendering
-   the iframe 3x oversized and scaling it back down shrinks that chrome
-   proportionally along with the map, so it reads as a quiet corner label
-   instead of a wall of text. */
-.map-corner iframe {
-  width: 444px; height: 324px; border: 0; pointer-events: none;
-  transform: scale(0.3333); transform-origin: top left;
-}
+.map-corner .leaflet-container { width: 100%; height: 100%; background: var(--ground); pointer-events: none; }
 
-/* Enlarged map modal */
+/* Enlarged map modal — a full, interactive Leaflet map (pan, scroll-zoom,
+   +/- control) with the same red marker, which — unlike OSM's iframe embed —
+   is real map content that stays correctly anchored to the point through any
+   pan or zoom, since it isn't a fake overlay guessing at the map's state. */
 .map-modal-body { position: relative; flex: 1 1 auto; min-height: 0; }
-.map-modal-body iframe { display: block; width: 100%; height: min(65vh, 520px); border: 0; }
-
-/* The photo's location, marked in red. The embed's bbox is always built
-   symmetrically around the point (see osmEmbed()), so it sits dead-center
-   regardless of zoom — a plain centered dot works without reading pixel
-   coordinates back out of the map. */
-.map-marker {
-  position: absolute; top: 50%; left: 50%; z-index: 4;
-  width: 12px; height: 12px; margin: -6px 0 0 -6px;
-  border-radius: 50%; background: #e0362f;
-  border: 2px solid #fff; box-shadow: 0 1px 4px rgba(0, 0, 0, 0.55);
-  pointer-events: none;
-}
+#mapFrameLarge { width: 100%; height: min(65vh, 520px); background: var(--ground); }
 
 /* iNaturalist identify button + suggestions */
 .btn-inat { background: var(--accent-soft); border-color: var(--accent-line); color: var(--accent-strong); font-weight: 600; }
 .btn-inat:hover { background: color-mix(in srgb, var(--accent) 18%, transparent); border-color: var(--accent); }
 .btn-inat .ic { width: 18px; height: 18px; }
+/* A flex item that's itself a flex container with non-visible overflow gets
+   an automatic minimum size of 0 (the classic flexbox "min-size" gotcha) —
+   without an explicit min-height, the chips were laid out but the container
+   collapsed to zero height, making every suggestion invisible. */
 #inatResults:empty { min-height: 0; }
-#inatResults:not(:empty) { margin-top: 14px; }
+#inatResults:not(:empty) { min-height: 24px; max-height: 58px; margin-top: 14px; }
 
 /* busy pill */
 .busy {
@@ -568,6 +619,21 @@ select.input {
 .fold-body h4 { margin-top: 16px; font-size: 13.5px; }
 .fold-body h4:first-child { margin-top: 6px; }
 .hint { color: var(--muted); font-size: 13px; line-height: 1.5; }
+
+/* Leading callout in the Help modal — the privacy/local-only explanation,
+   shown first so it's the very first thing a new user reads. */
+.privacy-banner {
+  display: flex; align-items: flex-start; gap: 11px;
+  margin: 6px 0 4px; padding: 14px 16px;
+  border: 1px solid var(--accent-line); background: var(--accent-soft);
+  border-radius: var(--r-md);
+}
+.privacy-banner .dot {
+  width: 9px; height: 9px; border-radius: 50%; flex: none; margin-top: 6px;
+  background: var(--done); box-shadow: 0 0 0 3px color-mix(in srgb, var(--done) 25%, transparent);
+}
+.privacy-banner strong { display: block; font-size: 14px; color: var(--ink); margin-bottom: 4px; }
+.privacy-banner p { margin: 0; font-size: 13px; line-height: 1.55; color: var(--muted); }
 .fold-body ul { margin: 6px 0 0; padding-left: 18px; }
 .fold-body li { margin-bottom: 5px; }
 .fold-body input[type=file] { margin-top: 8px; font-size: 13px; max-width: 100%; }
@@ -588,7 +654,7 @@ select.input {
 #dropHint.active { display: flex; }
 
 /* ---------- toasts ---------- */
-#toasts { position: fixed; bottom: 18px; right: 18px; z-index: 200; display: flex; flex-direction: column; gap: 9px; max-width: min(90vw, 380px); }
+#toasts { position: fixed; bottom: 18px; right: 18px; z-index: 400; display: flex; flex-direction: column; gap: 9px; max-width: min(90vw, 380px); }
 .toast { padding: 12px 16px; border-radius: var(--r-md); font-size: 13.5px; color: var(--ink);
   background: var(--elevated); border: 1px solid var(--hair-strong); box-shadow: var(--shadow-lg);
   border-left: 3px solid var(--accent); animation: toast-in .18s ease; }

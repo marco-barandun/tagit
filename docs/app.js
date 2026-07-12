@@ -533,13 +533,8 @@
   async function inatIdentify() {
     const p = current();
     if (!p) return;
-    const token = (S.inatToken || "").trim();
-    if (!token) {
-      toast("Add your iNaturalist token under Setup & tools first.", "warn", 6000);
-      const fold = document.querySelector("details.fold"); if (fold) fold.open = true;
-      $("inatToken") && $("inatToken").focus();
-      return;
-    }
+    const token = requireInatToken();
+    if (!token) return;
     setBusy("Asking iNaturalist…");
     try {
       const img = await squashTo299(await getFile(p));
@@ -553,12 +548,16 @@
       if (res.status === 401) throw new Error("token invalid or expired — get a fresh one");
       if (!res.ok) throw new Error("HTTP " + res.status);
       const data = await res.json();
-      const names = (data.results || [])
-        .map((r) => r.taxon && r.taxon.name).filter(Boolean).slice(0, 8);
-      S.inatResults = names;
+      const sugg = (data.results || [])
+        .map((r) => ({
+          name: r.taxon && r.taxon.name,
+          score: r.combined_score != null ? r.combined_score : r.vision_score,
+        }))
+        .filter((s) => s.name).slice(0, 8);
+      S.inatResults = sugg;
       S.inatResultsFor = p;
       renderInat();
-      if (!names.length) toast("iNaturalist returned no suggestions for this photo.", "info");
+      if (!sugg.length) toast("iNaturalist returned no suggestions for this photo.", "info");
     } catch (e) {
       console.error(e);
       toast("iNaturalist request failed: " + (e.message || e) + ".", "warn", 9000);
@@ -567,17 +566,46 @@
   function renderInat() {
     const box = $("inatResults"); if (!box) return;
     box.innerHTML = "";
-    const names = (S.inatResultsFor === current()) ? S.inatResults : [];
-    if (!names.length) return;
-    names.forEach((n) => box.append(el("button", {
-      className: "chip-btn", textContent: n, title: "Add to determination",
-      onclick: () => { addTaxon(n); if (!S.choices.includes(n)) { S.choices.push(n); S.choices.sort((a, b) => a.localeCompare(b)); } },
-    })));
+    const sugg = (S.inatResultsFor === current()) ? S.inatResults : [];
+    if (!sugg.length) return;
+    sugg.forEach((s) => box.append(el("button", {
+      className: "chip-btn", title: "Add to determination",
+      onclick: () => { addTaxon(s.name); if (!S.choices.includes(s.name)) { S.choices.push(s.name); S.choices.sort((a, b) => a.localeCompare(b)); } },
+    }, [
+      el("span", { className: "chip-name", textContent: s.name }),
+      ...(s.score != null ? [el("span", { className: "chip-score", textContent: Math.round(s.score) + "%" })] : []),
+    ])));
+  }
+  // The photo being identified, shown zoomable inside the iNaturalist tab
+  // itself (the modal backdrop otherwise hides the main stage entirely, so
+  // there was no way to actually look at the photo while picking a suggestion).
+  async function renderInatPhotoStage() {
+    const modal = $("inatModal");
+    const img = $("inatPhotoImg"), meta = $("inatPhotoMeta");
+    if (!modal || modal.hidden || !img || !meta) return;
+    const p = current();
+    if (!p) { img.src = ""; meta.innerHTML = ""; meta.hidden = true; resetInatZoom(); return; }
+    resetInatZoom();
+    try {
+      if (!p.url) p.url = URL.createObjectURL(await getFile(p));
+      img.src = p.url;
+    } catch (e) { console.warn("preview failed", e); img.src = ""; }
+    meta.innerHTML = "";
+    meta.append(el("div", { className: "meta-filename", textContent: p.name }));
+    if (p.datetime) {
+      meta.append(el("div", { textContent: "Date: " + fmtDay(p.datetime) }));
+      meta.append(el("div", { textContent: "Time: " + fmtTime(p.datetime) }));
+    } else meta.append(el("div", { textContent: "Date taken: unknown" }));
+    meta.append(el("div", { textContent: p.caption ? "Caption: " + p.caption : "No caption yet" }));
+    if (p.keywords && p.keywords.length) {
+      meta.append(el("div", { className: "meta-overlay-kw", textContent: p.keywords.join(" · ") }));
+    }
+    meta.hidden = !S.infoVisible;
   }
   function updateInatStatus(state) {
     const has = !!(S.inatToken && S.inatToken.trim());
     const tag = $("inatStatus"); const hint = $("inatHint");
-    if (hint) hint.textContent = has ? "" : "Add a token under Setup & tools to enable AI identification.";
+    if (hint) hint.textContent = has ? "" : "Paste your token below to enable AI identification.";
     if (!tag) return;
     if (state) tag.textContent = state;                    // e.g. "✓ marco" / "check failed"
     else tag.textContent = has ? "token set — press Check" : "";
@@ -623,8 +651,8 @@
 
   async function inatCreateObservation() {
     const p = current(); if (!p) return;
-    const token = (S.inatToken || "").trim();
-    if (!token) { toast("Add your iNaturalist token under Setup & tools first.", "warn", 6000); return; }
+    const token = requireInatToken();
+    if (!token) return;
     const taxa = S.selected.length ? S.selected : taxaFromCaption(p.caption);
     const name = (taxa[0] || "").trim();
     if (!name) { toast("Pick a taxon for this photo first.", "warn"); return; }
@@ -667,8 +695,14 @@
       } catch (e) { console.warn("photo upload to iNaturalist failed", e); }
 
       p.inatUrl = url;                                       // link it into the photo's metadata
-      const bytes = TagMeta.writeCaption(await getFileBytes(p), p.caption || "", p.keywords || [], url);
+      // Use the taxa just posted (not p.caption) — if the photo hasn't been
+      // saved yet in this session, p.caption is still empty and would silently
+      // wipe the caption while still creating a real iNaturalist observation.
+      const caption = composeForTaxa(taxa) || p.caption || "";
+      const keywords = keywordsForSave(taxa);
+      const bytes = TagMeta.writeCaption(await getFileBytes(p), caption, keywords, url);
       await rewritePhotoBytes(p, bytes);
+      p.caption = caption; p.keywords = keywords;
       render();
       toast("Observation created and linked to the photo.", "info", 6000);
     } catch (e) {
@@ -720,28 +754,287 @@
     } finally { setBusy(null); }
   }
 
-  // ---- map (OpenStreetMap embed) --------------------------------------------
+  // If no token is set, complain and open the iNaturalist tab to the token
+  // field instead of failing silently — shared by every iNaturalist entry point.
+  function requireInatToken() {
+    const token = (S.inatToken || "").trim();
+    if (token) return token;
+    toast("Add your iNaturalist token first.", "warn", 6000);
+    openModal("inatModal");
+    setTimeout(() => { $("inatToken") && $("inatToken").focus(); }, 50);
+    return null;
+  }
+
+  // ---- iNaturalist: screen an old collection for photos you already posted -
+  // Two-stage match: (1) same date/time within a window, (2) perceptual-hash
+  // image similarity for anything that passes stage 1. You confirm each match
+  // side-by-side; confirming adopts the iNat ID as the caption/keywords and
+  // links the observation, so an already-identified old photo doesn't need to
+  // be tagged again by hand.
+
+  // Difference hash (dHash) — robust to resizing/recompression (exactly what
+  // happens when iNat re-encodes an upload), cheap to compute with Canvas
+  // alone. Returns a 72-bit vector as a BigInt.
+  async function pHashFromBlob(blob) {
+    const SIZE = 9; // 9x8 grid of comparisons -> 72 bits
+    const bmp = await createImageBitmap(blob);
+    const c = document.createElement("canvas"); c.width = SIZE; c.height = SIZE - 1;
+    const ctx = c.getContext("2d");
+    ctx.drawImage(bmp, 0, 0, SIZE, SIZE - 1);
+    if (bmp.close) bmp.close();
+    const { data } = ctx.getImageData(0, 0, SIZE, SIZE - 1);
+    const gray = [];
+    for (let i = 0; i < data.length; i += 4) gray.push(0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2]);
+    let hash = 0n, bit = 0n;
+    for (let y = 0; y < SIZE - 1; y++) {
+      for (let x = 0; x < SIZE - 1; x++) {
+        const idx = y * SIZE + x;
+        if (gray[idx] > gray[idx + 1]) hash |= 1n << bit;
+        bit++;
+      }
+    }
+    return hash;
+  }
+  function hammingDistance(a, b) {
+    let x = a ^ b, count = 0;
+    while (x) { count += Number(x & 1n); x >>= 1n; }
+    return count;
+  }
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+  function inatObsSummary(o) {
+    let dt = null;
+    if (o.time_observed_at) dt = new Date(o.time_observed_at);
+    else if (o.observed_on_string) dt = new Date(o.observed_on_string.replace(" ", "T"));
+    else if (o.observed_on) dt = new Date(o.observed_on);
+    if (dt && isNaN(dt.getTime())) dt = null;
+    const taxonName = (o.taxon && o.taxon.name) || o.species_guess || "";
+    const photo = o.photos && o.photos[0];
+    let photoUrl = photo && (photo.url || "");
+    if (photoUrl) photoUrl = photoUrl.replace(/square/, "medium");
+    return {
+      id: o.id, uri: o.uri || ("https://www.inaturalist.org/observations/" + o.id),
+      datetime: dt, taxonName, photoUrl, qualityGrade: o.quality_grade || "",
+    };
+  }
+  // Paginated fetch of the account's observations in a date range. Capped at
+  // 5 pages (1000 observations) and lightly throttled to stay polite to the API.
+  async function fetchInatObservationsInRange(token, userId, d1, d2) {
+    const out = [];
+    for (let page = 1; page <= 5; page++) {
+      const url = `https://api.inaturalist.org/v1/observations?user_id=${userId}&d1=${d1}&d2=${d2}&per_page=200&page=${page}&order=asc&order_by=observed_on`;
+      const res = await fetch(url, { headers: token ? { Authorization: "Bearer " + token } : {} });
+      if (!res.ok) throw new Error("HTTP " + res.status);
+      const json = await res.json();
+      out.push(...(json.results || []));
+      if (out.length >= (json.total_results || 0) || (json.results || []).length === 0) break;
+      await sleep(250);
+    }
+    return out;
+  }
+
+  // Stage 1 (date/time) + stage 2 (image similarity), building a review queue.
+  async function inatScreenCollection(windowMinutes) {
+    const token = requireInatToken();
+    if (!token) return;
+
+    setBusy("Checking your iNaturalist account…");
+    let who;
+    try {
+      const res = await fetch("https://api.inaturalist.org/v1/users/me", { headers: { Authorization: "Bearer " + token } });
+      if (!res.ok) throw new Error("token invalid or expired");
+      const data = await res.json();
+      who = data.results && data.results[0];
+    } catch (e) { setBusy(null); toast("Couldn’t verify your token: " + (e.message || e), "warn", 8000); return; }
+    if (!who) { setBusy(null); toast("Couldn’t identify your iNaturalist account.", "warn"); return; }
+
+    // Every photo with a date is a candidate, regardless of status — not just
+    // untouched ones. Someone may have already hand-labelled, skipped or even
+    // deleted a photo before finding this screening tool, and still wants it
+    // checked and linked against their iNaturalist account.
+    const candidates = S.photos.filter((p) => p.datetime);
+    if (!candidates.length) { setBusy(null); toast("No dated photos to screen (still-loading dates are skipped — try again in a moment).", "info", 7000); return; }
+
+    const times = candidates.map((p) => p.datetime.getTime());
+    const pad = 24 * 3600 * 1000;
+    const d1 = new Date(Math.min(...times) - pad).toISOString().slice(0, 10);
+    const d2 = new Date(Math.max(...times) + pad).toISOString().slice(0, 10);
+
+    setBusy("Fetching your iNaturalist observations…");
+    let obsRaw;
+    try { obsRaw = await fetchInatObservationsInRange(token, who.id, d1, d2); }
+    catch (e) { setBusy(null); toast("Couldn’t fetch observations: " + (e.message || e), "warn", 8000); return; }
+    const obsList = obsRaw.map(inatObsSummary).filter((o) => o.datetime && o.photoUrl);
+    if (!obsList.length) { setBusy(null); toast("No dated iNaturalist observations with photos found in that range.", "info", 7000); return; }
+
+    const queue = [];
+    for (const p of candidates) {
+      const matches = obsList
+        .map((o) => ({ o, gapMin: Math.abs(o.datetime - p.datetime) / 60000 }))
+        .filter((x) => x.gapMin <= windowMinutes)
+        .sort((a, b) => a.gapMin - b.gapMin);
+      if (matches.length) queue.push({ photo: p, matches, candIdx: 0 });
+    }
+    if (!queue.length) { setBusy(null); toast(`Checked ${obsList.length} observation(s) — no time matches within ±${windowMinutes} min.`, "info", 7000); return; }
+
+    setBusy(`Comparing photos… 0/${queue.length}`);
+    let done = 0;
+    for (const item of queue) {
+      let localHash = null;
+      try { localHash = await pHashFromBlob(await getFile(item.photo)); } catch (e) { /* leave unscored */ }
+      for (const m of item.matches) {
+        if (localHash == null) { m.score = null; continue; }
+        try {
+          const resp = await fetch(m.o.photoUrl);
+          if (!resp.ok) throw new Error("HTTP " + resp.status);
+          const blob = await resp.blob();
+          const remoteHash = await pHashFromBlob(blob);
+          m.score = hammingDistance(localHash, remoteHash);
+        } catch (e) { m.score = null; }
+        await sleep(200);                                    // be polite to iNat's API/CDN
+      }
+      item.matches.sort((a, b) => (a.score ?? 999) - (b.score ?? 999));
+      done++; setBusy(`Comparing photos… ${done}/${queue.length}`);
+    }
+    setBusy(null);
+
+    S.matchQueue = queue;
+    S.matchQueueIdx = 0;
+    S.matchSummary = { linked: 0, skipped: 0, total: queue.length };
+    openModal("inatMatchModal");
+    renderMatchReview();
+  }
+
+  function scoreLabel(score) {
+    if (score == null) return { cls: "unknown", text: "Similarity unknown" };
+    if (score <= 8) return { cls: "high", text: "High match confidence" };
+    if (score <= 16) return { cls: "medium", text: "Possible match" };
+    return { cls: "low", text: "Low similarity" };
+  }
+
+  async function renderMatchReview() {
+    const queue = S.matchQueue;
+    if (!queue || S.matchQueueIdx >= queue.length) { finishMatchReview(); return; }
+    const item = queue[S.matchQueueIdx];
+    const cand = item.matches[item.candIdx];
+    const p = item.photo;
+
+    $("matchProgress").textContent =
+      `Photo ${S.matchQueueIdx + 1} of ${queue.length}` +
+      (item.matches.length > 1 ? ` — candidate ${item.candIdx + 1} of ${item.matches.length}` : "");
+
+    if (!p.url) { try { p.url = URL.createObjectURL(await getFile(p)); } catch (e) { /* ignore */ } }
+    $("matchLocalImg").src = p.url || "";
+    $("matchLocalMeta").innerHTML = "";
+    $("matchLocalMeta").append(el("div", { textContent: p.name }));
+    $("matchLocalMeta").append(el("div", { textContent: p.datetime ? fmtDate(p.datetime) : "date unknown" }));
+
+    $("matchInatImg").src = cand.o.photoUrl || "";
+    $("matchInatMeta").innerHTML = "";
+    $("matchInatMeta").append(el("div", { textContent: cand.o.taxonName || "(no ID yet)" }));
+    $("matchInatMeta").append(el("div", { textContent: cand.o.datetime ? fmtDate(cand.o.datetime) : "date unknown" }));
+    const linkDiv = el("div");
+    linkDiv.append(el("a", { href: cand.o.uri, target: "_blank", rel: "noopener", textContent: "View on iNaturalist ↗" }));
+    $("matchInatMeta").append(linkDiv);
+
+    const sc = scoreLabel(cand.score);
+    const badge = $("matchScoreBadge");
+    badge.className = "match-score " + sc.cls;
+    badge.textContent = sc.text + (cand.gapMin < 1 ? " · same minute" : ` · ${cand.gapMin.toFixed(1)} min apart`);
+  }
+
+  async function matchConfirmSame() {
+    const queue = S.matchQueue;
+    const item = queue[S.matchQueueIdx];
+    const cand = item.matches[item.candIdx];
+    const p = item.photo;
+    setBusy("Linking…");
+    try {
+      const taxonName = cand.o.taxonName;
+      const caption = taxonName ? composeCaption(taxonName, familyFor(taxonName)) : CFG.undeterminedCaption;
+      const keywords = taxonName ? autoKeywords([taxonName]) : [];
+      p.inatUrl = cand.o.uri;
+      const origBytes = S.mode === "fs" ? await getFileBytes(p) : null;
+      const bytes = await composeSaveBytes(p, caption, keywords);
+      // No taxon on the matched observation yet ("Unknown"/unidentified) — file
+      // it as undetermined rather than labelled, so the status badge matches
+      // the "Indet." caption instead of implying a real determination.
+      await applyStatus(p, taxonName ? "labelled" : "undetermined", caption, bytes, taxonName ? [taxonName] : null, keywords, origBytes);
+      S.matchSummary.linked++;
+    } catch (e) {
+      console.error(e); toast("Couldn’t link this photo: " + (e.message || e), "warn", 7000);
+    } finally { setBusy(null); }
+    S.matchQueueIdx++;
+    render();
+    renderMatchReview();
+  }
+  function matchNotAMatch() {
+    const item = S.matchQueue[S.matchQueueIdx];
+    item.candIdx++;
+    if (item.candIdx >= item.matches.length) S.matchQueueIdx++;
+    renderMatchReview();
+  }
+  function matchSkipPhoto() {
+    S.matchSummary.skipped++;
+    S.matchQueueIdx++;
+    renderMatchReview();
+  }
+  function finishMatchReview() {
+    $("inatMatchModal").hidden = true;
+    const s = S.matchSummary;
+    if (s) toast(`Screening done — linked ${s.linked} of ${s.total} photo(s).`, "info", 7000);
+    S.matchQueue = null; S.matchSummary = null;
+  }
+
+  // ---- map (real Leaflet maps, not an OSM iframe embed) ---------------------
   // A small always-in-place preview sits in the photo's bottom-right corner;
-  // clicking it opens a larger view in a modal (tighter zoom = larger view).
-  function osmEmbed(lat, lon, delta) {
-    const d = delta;
-    const bbox = [lon - d, lat - d, lon + d, lat + d].map((n) => n.toFixed(5)).join("%2C");
-    // No &marker= param — the bbox is symmetric around the point, so it always
-    // lands dead-center, and our own red .map-marker dot sits there instead
-    // (gives us control over its color, which OSM's own pin doesn't offer).
-    return `https://www.openstreetmap.org/export/embed.html?bbox=${bbox}&layer=mapnik`;
+  // clicking it opens a larger, fully interactive view in a modal. Both use
+  // the same OSM tiles the old iframe embed did, but as same-origin Leaflet
+  // maps we render the location marker ourselves — any color we like, and it
+  // stays correctly anchored through pan/zoom since it's real map content,
+  // not a CSS dot guessing at the iframe's internal view state.
+  const MARKER_STYLE = { radius: 7, color: "#fff", weight: 2, fillColor: "#e0362f", fillOpacity: 1 };
+  function addTileLayer(map) {
+    L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", {
+      maxZoom: 19,
+      attribution: '&copy; <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener">OpenStreetMap</a> contributors',
+    }).addTo(map);
+  }
+  let cornerMap = null, cornerMarker = null;
+  function ensureCornerMap() {
+    if (cornerMap) return cornerMap;
+    cornerMap = L.map("mapCornerFrame", {
+      zoomControl: false, attributionControl: false, dragging: false,
+      scrollWheelZoom: false, doubleClickZoom: false, boxZoom: false,
+      keyboard: false, touchZoom: false, tap: false, fadeAnimation: false,
+    });
+    addTileLayer(cornerMap);
+    return cornerMap;
+  }
+  let largeMap = null, largeMarker = null;
+  function ensureLargeMap() {
+    if (largeMap) return largeMap;
+    largeMap = L.map("mapFrameLarge");
+    addTileLayer(largeMap);
+    return largeMap;
   }
   function renderPhotoControls() {
     const p = current();
     const hasGps = p && p.lat != null && p.lon != null;
     const corner = $("mapCorner");
-    if (!hasGps) { corner.hidden = true; $("mapCornerFrame").src = "about:blank"; return; }
+    if (!hasGps) { corner.hidden = true; return; }
     if (S.mapVisible) {
-      const url = osmEmbed(p.lat, p.lon, 0.006);
-      if ($("mapCornerFrame").src !== url) $("mapCornerFrame").src = url;
       corner.hidden = false;
+      const map = ensureCornerMap();
+      map.setView([p.lat, p.lon], 15);
+      if (cornerMarker) cornerMarker.setLatLng([p.lat, p.lon]);
+      else cornerMarker = L.circleMarker([p.lat, p.lon], MARKER_STYLE).addTo(map);
+      // The container was just un-hidden (or created at zero size) — Leaflet
+      // needs a nudge once it actually has real dimensions to lay tiles out
+      // correctly.
+      setTimeout(() => map.invalidateSize(), 0);
     } else {
-      corner.hidden = true; $("mapCornerFrame").src = "about:blank";
+      corner.hidden = true;
     }
   }
   // The "Show/Hide map" control lives inline with the other photo info, added
@@ -759,8 +1052,14 @@
   function openMapModal() {
     const p = current();
     if (!p || p.lat == null || p.lon == null) return;
-    $("mapFrameLarge").src = osmEmbed(p.lat, p.lon, 0.0015);
     openModal("mapModal");
+    const map = ensureLargeMap();
+    map.setView([p.lat, p.lon], 17);
+    if (largeMarker) largeMarker.setLatLng([p.lat, p.lon]);
+    else largeMarker = L.circleMarker([p.lat, p.lon], MARKER_STYLE).addTo(map);
+    // The modal (and so #mapFrameLarge) was hidden until openModal() just ran
+    // — Leaflet needs a nudge once it's actually visible and sized.
+    setTimeout(() => map.invalidateSize(), 50);
   }
 
   // ---- folder loading ------------------------------------------------------
@@ -1072,9 +1371,19 @@
 
   // ---- generic modal open/close (iNaturalist, Navigate & act) --------------
   function openModal(id) { $(id).hidden = false; }
-  function closeModal(id) { $(id).hidden = true; }
+  // The match-review modal needs to report its summary and clear S.matchQueue
+  // whenever it closes — not just via its own × button, but also Escape and
+  // clicking the backdrop, so an abandoned review never leaves stale queue
+  // state or skips the "done" toast.
+  function closeModal(id) {
+    if (id === "inatMatchModal" && S.matchQueue) { finishMatchReview(); return; }
+    $(id).hidden = true;
+  }
   function closeAllModals() {
-    document.querySelectorAll(".modal-overlay:not([hidden])").forEach((m) => { m.hidden = true; });
+    document.querySelectorAll(".modal-overlay:not([hidden])").forEach((m) => {
+      if (m.id === "inatMatchModal" && S.matchQueue) finishMatchReview();
+      else m.hidden = true;
+    });
   }
 
   // Move on after an action; if the view is exhausted, say so — and if the
@@ -1218,7 +1527,11 @@
   async function doSave() {
     const caption = $("captionBox").value.trim();
     if (!caption) { toast("Add a taxon or type a caption first.", "info", 2500); return; }
-    if (await finalizeCaptionSave(current(), caption, [...S.selected])) advance();
+    // Derive taxa from the caption text itself (not S.selected) so keywords stay
+    // correct even after the text was set some other way (copy last, typed by
+    // hand, filled from an iNaturalist suggestion) without S.selected being kept
+    // in sync.
+    if (await finalizeCaptionSave(current(), caption, taxaFromCaption(caption))) advance();
   }
   async function instantSave(taxa) {
     const caption = composeForTaxa(taxa);
@@ -1273,7 +1586,20 @@
     setBusy(null);
     render();
   }
-  function copyLast() { if (S.lastCaption) { $("captionBox").value = S.lastCaption; } }
+  // Mirror the caption text between the sidebar box and the iNaturalist tab's
+  // copy of it, so either one can be edited/saved from and both stay truthful.
+  function setCaptionBox(text) {
+    if ($("captionBox")) $("captionBox").value = text;
+    if ($("inatCaptionBox")) $("inatCaptionBox").value = text;
+  }
+  function copyLast() {
+    if (!S.lastCaption) return;
+    setCaptionBox(S.lastCaption);
+    S.selected = taxaFromCaption(S.lastCaption);
+    S.cf = /cf\./.test(S.lastCaption);
+    if ($("cfBox")) $("cfBox").checked = S.cf;
+    renderSelection(); renderFamilyBox();
+  }
 
   // ---- selection ------------------------------------------------------------
   function addTaxon(t) {
@@ -1283,7 +1609,7 @@
   function clearSelection() {
     S.selected = []; S.cf = false;
     if ($("cfBox")) $("cfBox").checked = false;
-    if ($("captionBox")) $("captionBox").value = "";
+    setCaptionBox("");
     if ($("keywordsBox")) $("keywordsBox").value = "";
     renderSelection(); renderFamilyBox();
   }
@@ -1296,12 +1622,12 @@
     S.cf = p ? /cf\./.test(p.caption) : false;
     if ($("cfBox")) $("cfBox").checked = S.cf;
     renderSelection();
-    if ($("captionBox")) $("captionBox").value = composeForTaxa(S.selected);
+    setCaptionBox(composeForTaxa(S.selected));
     if ($("keywordsBox")) $("keywordsBox").value = manualKeywordsFromPhoto(p).join(", ");
     renderFamilyBox();
   }
   function updateCaptionBox() {
-    if ($("captionBox")) $("captionBox").value = composeForTaxa(S.selected);
+    setCaptionBox(composeForTaxa(S.selected));
     renderFamilyBox();
   }
 
@@ -1325,7 +1651,7 @@
       $("meta").hidden = true; $("meta").innerHTML = "";
       $("statusCorner").textContent = ""; $("statusCorner").hidden = true;
       renderSuggestions(); renderRecent(); renderSelection();
-      renderInat(); renderPhotoControls();
+      renderInat(); renderPhotoControls(); renderInatPhotoStage();
       return;
     }
     // preview
@@ -1363,7 +1689,7 @@
     $("meta").hidden = !S.infoVisible;
 
     renderSuggestions(); renderRecent(); renderSelection();
-    renderInat(); renderPhotoControls();
+    renderInat(); renderPhotoControls(); renderInatPhotoStage();
     if (!$("captionBox").value) updateCaptionBox();
   }
 
@@ -1419,17 +1745,16 @@
       const prefill = S.sessionFamilies.get(S.selected[0]) || "";
       holder.append(el("label", { className: "field-label", textContent: "Family (new taxon — added to your taxonomy on save)" }));
       const inp = el("input", { id: "familyBox", className: "input", value: prefill, placeholder: "e.g. Asteraceae" });
-      inp.addEventListener("input", () => { $("captionBox").value = composeForTaxa(S.selected); });
+      inp.addEventListener("input", () => { setCaptionBox(composeForTaxa(S.selected)); });
       holder.append(inp);
     }
   }
 
   // ---- photo zoom & pan ----------------------------------------------------
-  let resetZoom = () => {};
-  function setupZoom() {
-    const stage = document.querySelector(".stage");
-    const img = $("photo");
-    if (!stage || !img) return;
+  // Shared by the main stage image and the iNaturalist tab's own photo preview
+  // — wires click-to-zoom, wheel-zoom and drag-to-pan onto any (img, stage)
+  // pair, and returns a reset() for that pair.
+  function wireZoom(img, stage) {
     let scale = 1, tx = 0, ty = 0, dragging = false, sx = 0, sy = 0, moved = false;
     const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
     const apply = () => {
@@ -1447,7 +1772,7 @@
       if (scale <= 1.001) { scale = 1; tx = 0; ty = 0; }
       apply();
     };
-    resetZoom = () => { scale = 1; tx = 0; ty = 0; apply(); };
+    const reset = () => { scale = 1; tx = 0; ty = 0; apply(); };
 
     stage.addEventListener("wheel", (e) => {
       if (!img.getAttribute("src")) return;
@@ -1470,9 +1795,22 @@
     img.addEventListener("click", (e) => {
       if (moved) { moved = false; return; }              // a drag, not a click
       if (scale === 1) zoomAt(e.clientX, e.clientY, 2.5); // click to zoom in at point
-      else resetZoom();                                   // click again to zoom out
+      else reset();                                       // click again to zoom out
     });
-    img.addEventListener("dblclick", (e) => { e.preventDefault(); resetZoom(); });
+    img.addEventListener("dblclick", (e) => { e.preventDefault(); reset(); });
+    return reset;
+  }
+  let resetZoom = () => {};
+  function setupZoom() {
+    const stage = document.querySelector(".stage");
+    const img = $("photo");
+    if (stage && img) resetZoom = wireZoom(img, stage);
+  }
+  let resetInatZoom = () => {};
+  function setupInatZoom() {
+    const stage = document.querySelector(".inat-stage");
+    const img = $("inatPhotoImg");
+    if (stage && img) resetInatZoom = wireZoom(img, stage);
   }
 
   // ---- autocomplete dropdown ----------------------------------------------
@@ -1529,24 +1867,36 @@
     if ($("emptyOpen")) $("emptyOpen").onclick = openFolder;
     $("saveBtn").onclick = doSave;
     $("copyLastBtn").onclick = copyLast;
+    if ($("inatSaveBtn")) $("inatSaveBtn").onclick = doSave;
+
+    // Keep the sidebar caption box and the iNaturalist tab's copy of it in sync
+    // when either is edited by hand.
+    $("captionBox").addEventListener("input", (e) => {
+      if ($("inatCaptionBox")) $("inatCaptionBox").value = e.target.value;
+    });
+    if ($("inatCaptionBox")) $("inatCaptionBox").addEventListener("input", (e) => {
+      $("captionBox").value = e.target.value;
+    });
 
     // back to the setup page (taxonomies, iNaturalist, watermark, settings)
     $("setupBtn").onclick = () => openModal("setupModal");
     $("helpBtn").onclick = () => openModal("helpModal");
 
     // toggle the photo-info panel (map / date / time / caption / keywords)
-    $("infoToggleBtn").onclick = () => {
+    const toggleInfoVisible = () => {
       S.infoVisible = !S.infoVisible;
       LS.set("infoVisible", S.infoVisible);
       applyInfoVisibility();
     };
+    $("infoToggleBtn").onclick = toggleInfoVisible;
+    if ($("inatInfoToggleBtn")) $("inatInfoToggleBtn").onclick = toggleInfoVisible;
 
     // end-of-folder recap
     $("congratsCloseBtn").onclick = hideCongrats;
     $("congratsOverlay").addEventListener("click", (e) => { if (e.target.id === "congratsOverlay") hideCongrats(); });
 
     // iNaturalist / Navigate & act: full-height modals opened from a slim row
-    $("inatModalBtn").onclick = () => openModal("inatModal");
+    $("inatModalBtn").onclick = () => { openModal("inatModal"); renderInatPhotoStage(); };
     $("navModalBtn").onclick = () => openModal("navModal");
 
     // Small corner map preview on the photo — click (or Enter/Space) to enlarge
@@ -1630,6 +1980,21 @@
     $("inatCheckBtn").onclick = inatVerify;
     $("inatObsBtn").onclick = inatCreateObservation;
     $("inatSyncBtn").onclick = inatSyncObservations;
+
+    // Screen an old collection for photos already posted to iNaturalist
+    $("inatScreenBtn").onclick = () => openModal("inatScreenConfigModal");
+    $("screenStartBtn").onclick = () => {
+      const win = Math.max(1, +$("screenWindowMin").value || 5);
+      closeModal("inatScreenConfigModal");
+      inatScreenCollection(win);
+    };
+    $("matchSameBtn").onclick = matchConfirmSame;
+    $("matchNotBtn").onclick = matchNotAMatch;
+    $("matchSkipBtn").onclick = matchSkipPhoto;
+    // Its × button, the backdrop, and Escape all route through closeModal /
+    // closeAllModals, which special-case this modal id to call
+    // finishMatchReview() — see closeModal().
+
     $("inatGeo").value = LS.get("inatGeo", "open");
     $("inatGeo").addEventListener("change", (e) => LS.set("inatGeo", e.target.value));
     $("inatToken").value = S.inatToken;
@@ -1700,9 +2065,12 @@
   function applyInfoVisibility() {
     if ($("meta")) $("meta").hidden = !S.infoVisible || !current();
     if ($("statusCorner")) $("statusCorner").hidden = !S.infoVisible || !current();
+    if ($("inatPhotoMeta")) $("inatPhotoMeta").hidden = !S.infoVisible || !current();
     const btn = $("infoToggleBtn");
     btn.setAttribute("aria-pressed", String(S.infoVisible));
     btn.title = S.infoVisible ? "Hide photo info (filename, status, date, time, caption, keywords)" : "Show photo info (filename, status, date, time, caption, keywords)";
+    const inatBtn = $("inatInfoToggleBtn");
+    if (inatBtn) inatBtn.setAttribute("aria-pressed", String(S.infoVisible));
   }
 
   // ---- boot ----------------------------------------------------------------
@@ -1715,7 +2083,7 @@
     await idb.open();
     restore();
     applyInfoVisibility();
-    wireButtons(); wireDropzone(); wireKeyboard(); setupAutocomplete(); setupZoom();
+    wireButtons(); wireDropzone(); wireKeyboard(); setupAutocomplete(); setupZoom(); setupInatZoom();
     render();
     // Discover taxonomies. On first run, enable all bundled ones by default;
     // otherwise restore the set the user had active (several can be on at once).
@@ -1732,6 +2100,12 @@
       $("reopenBtn").style.display = "inline-block";
       $("reopenBtn").textContent = `Reopen “${last.name}”`;
       $("reopenBtn").onclick = reopenLastFolder;
+    }
+    // First-ever visit: show the how-it-works/privacy panel unprompted, so
+    // "nothing is uploaded" isn't just a small badge someone has to notice.
+    if (!LS.get("seenWelcome", false)) {
+      LS.set("seenWelcome", true);
+      openModal("helpModal");
     }
   }
 
