@@ -52,7 +52,7 @@
     taxonomyCache: new Map(),      // id -> records[] {taxon, family, attrs}
     obs: [],               // [{species, datetime:Date, locality}]
     sessionFamilies: new Map(),
-    statusFilter: new Set(["untouched"]),
+    statusFilter: new Set(["untouched", "labelled", "skipped", "undetermined", "deleted"]),
     metaToken: 0,          // invalidates in-flight background metadata reads on reload
     inatToken: "",         // iNaturalist API token (browser-only)
     inatResults: [],       // last CV suggestions
@@ -199,6 +199,24 @@
     return caption.split(",").map((p) =>
       p.trim().replace(/\s*\(.*\)$/, "").replace(/ cf\./g, "").trim()
     ).filter(Boolean);
+  }
+  // Lets "dro rot" find "Drosera rotundifolia" and "dact fuch" find
+  // "Dactylorhiza maculata subsp. fuchsii" — each typed word just needs to
+  // prefix some word of the candidate, in order (not necessarily adjacent),
+  // so abbreviating genus + species (skipping any subsp./var. in between)
+  // works without needing the exact substring.
+  function matchesAbbrev(candidateLower, queryWords) {
+    const cWords = candidateLower.split(/\s+/);
+    let ci = 0;
+    for (const qw of queryWords) {
+      let found = false;
+      while (ci < cWords.length) {
+        ci++;
+        if (cWords[ci - 1].startsWith(qw)) { found = true; break; }
+      }
+      if (!found) return false;
+    }
+    return true;
   }
 
   // ---- CSV / observation parsing ------------------------------------------
@@ -1540,7 +1558,11 @@
   }
   async function saveSameAsPrevious() {
     if (!S.lastCaption) { toast("Nothing saved yet to reuse.", "info", 2500); return; }
-    if (await finalizeCaptionSave(current(), S.lastCaption, taxaFromCaption(S.lastCaption))) advance();
+    const caption = S.lastCaption;
+    if (await finalizeCaptionSave(current(), caption, taxaFromCaption(caption))) {
+      toast(caption, "info", 1600);
+      advance();
+    }
   }
 
   async function markUndetermined() {
@@ -1592,15 +1614,6 @@
     if ($("captionBox")) $("captionBox").value = text;
     if ($("inatCaptionBox")) $("inatCaptionBox").value = text;
   }
-  function copyLast() {
-    if (!S.lastCaption) return;
-    setCaptionBox(S.lastCaption);
-    S.selected = taxaFromCaption(S.lastCaption);
-    S.cf = /cf\./.test(S.lastCaption);
-    if ($("cfBox")) $("cfBox").checked = S.cf;
-    renderSelection(); renderFamilyBox();
-  }
-
   // ---- selection ------------------------------------------------------------
   function addTaxon(t) {
     t = t.trim();
@@ -1625,6 +1638,11 @@
     setCaptionBox(composeForTaxa(S.selected));
     if ($("keywordsBox")) $("keywordsBox").value = manualKeywordsFromPhoto(p).join(", ");
     renderFamilyBox();
+    // Never leave leftover search text (or a blinking cursor) sitting in the
+    // taxon search box on the new photo — typing again should always start
+    // a fresh search, not append to whatever was typed for the last one.
+    const taxonInput = $("taxonInput");
+    if (taxonInput) { taxonInput.value = ""; taxonInput.blur(); }
   }
   function updateCaptionBox() {
     setCaptionBox(composeForTaxa(S.selected));
@@ -1732,7 +1750,10 @@
   function renderRecent() {
     const box = $("recent"); box.innerHTML = "";
     if (!S.recent.length) { box.append(el("em", { textContent: "None yet — saved taxa appear here.", className: "muted" })); return; }
-    S.recent.forEach((s) => box.append(el("button", { className: "chip-btn", textContent: s, onclick: () => instantSave([...new Set([...S.selected, s])]) })));
+    // Adds to the current determination without saving/advancing — picking a
+    // recently-used taxon is a starting point you might still adjust (add a
+    // second taxon, tick cf.) before actually saving.
+    S.recent.forEach((s) => box.append(el("button", { className: "chip-btn", textContent: s, onclick: () => addTaxon(s) })));
   }
   // Selected taxa aren't shown as chips — the caption box (and the photo
   // overlay once saved) already reflects them, so a separate chip list would
@@ -1817,14 +1838,18 @@
   function setupAutocomplete() {
     const input = $("taxonInput");
     const menu = $("acMenu");
-    let items = [], hi = -1;
-    const close = () => { menu.style.display = "none"; items = []; hi = -1; };
+    let items = [], matches = [], hi = -1;
+    const close = () => { menu.style.display = "none"; items = []; matches = []; hi = -1; };
     const open = () => {
       const q = input.value.trim().toLowerCase();
       menu.innerHTML = "";
-      let matches = [];
+      matches = [];
       if (q) {
-        matches = S.choices.filter((c) => c.toLowerCase().includes(q)).slice(0, 50);
+        const qWords = q.split(/\s+/).filter(Boolean);
+        matches = S.choices.filter((c) => {
+          const lc = c.toLowerCase();
+          return lc.includes(q) || matchesAbbrev(lc, qWords);
+        }).slice(0, 50);
       }
       items = matches.slice();
       const exact = q && S.choices.some((c) => c.toLowerCase() === q);
@@ -1840,6 +1865,17 @@
       hi = -1;
     };
     const pickItem = (t) => { addTaxon(t); input.value = ""; close(); input.focus(); };
+    // Enter on a recognized taxon (typed abbreviation or arrow-key pick) is a
+    // "this is my final answer" gesture — save immediately and move on, so a
+    // whole photo can be tagged with one short type + Enter, no extra click.
+    const pickMatchAndAdvance = (t) => {
+      const taxa = [...new Set([...S.selected, t])];
+      input.value = ""; close();
+      // This moves to the next photo — leave the search box unfocused
+      // there (syncSelectionFromCaption() clears/blurs it), rather than
+      // re-focusing it here just to have it wiped out immediately after.
+      instantSave(taxa);
+    };
     const highlight = () => {
       [...menu.children].forEach((c, i) => c.classList.toggle("hi", i === hi));
     };
@@ -1852,7 +1888,9 @@
       else if (e.key === "ArrowUp") { e.preventDefault(); hi = Math.max(hi - 1, 0); highlight(); }
       else if (e.key === "Enter") {
         e.preventDefault();
-        if (hi >= 0 && items[hi]) pickItem(items[hi]);
+        if (hi >= 0 && items[hi] !== undefined) {
+          if (hi < matches.length) pickMatchAndAdvance(items[hi]); else pickItem(items[hi]);
+        } else if (matches.length) pickMatchAndAdvance(matches[0]);
         else if (input.value.trim()) pickItem(input.value.trim());
         else doSave();
       } else if (e.key === "Escape") close();
@@ -1866,7 +1904,7 @@
     $("openFolder").onclick = openFolder;
     if ($("emptyOpen")) $("emptyOpen").onclick = openFolder;
     $("saveBtn").onclick = doSave;
-    $("copyLastBtn").onclick = copyLast;
+    $("copyLastBtn").onclick = saveSameAsPrevious;
     if ($("inatSaveBtn")) $("inatSaveBtn").onclick = doSave;
 
     // Keep the sidebar caption box and the iNaturalist tab's copy of it in sync
@@ -2029,13 +2067,17 @@
       if (tag === "input" || tag === "textarea" || e.target.isContentEditable) return;
       if (!S.photos.length) return;
       const k = e.key;
+      // Typing a letter with nothing focused starts a taxon search instead
+      // of a stray single-letter shortcut — a species name is what you're
+      // almost always about to type. Rotate/undo/etc. stay one click away
+      // as buttons; digits and navigation keys are left alone below since
+      // taxon names don't start with those.
+      if (/^[a-zA-Z]$/.test(k) && !e.metaKey && !e.ctrlKey && !e.altKey) {
+        $("taxonInput").focus();
+        return;
+      }
       if (k === "ArrowRight") { e.preventDefault(); goNext(); }
       else if (k === "ArrowLeft") { e.preventDefault(); goPrev(); }
-      else if (k === "r" || k === "R") { e.preventDefault(); rotateCurrent(); }
-      else if (k === "c" || k === "C") { e.preventDefault(); copyLast(); }
-      else if (k === "u" || k === "U") { e.preventDefault(); doUndo(); }
-      else if (k === "i" || k === "I") { e.preventDefault(); markUndetermined(); }
-      else if (k === "s" || k === "S") { e.preventDefault(); saveSameAsPrevious(); }
       else if (/^[1-9]$/.test(k)) {
         e.preventDefault();
         const sp = suggestSpecies(current().datetime);

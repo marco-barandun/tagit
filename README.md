@@ -48,9 +48,14 @@ come across automatically.
 
 ### Keyboard shortcuts
 
-`←` `→` navigate · `1`–`9` pick that suggestion · `r` rotate · `c` copy last
-caption · `u` undo · `i` can't-determine · `s` same as previous · `Delete`
-discard (only when no taxon is selected).
+`←` `→` navigate · `1`–`9` pick that suggestion · `Delete` discard (only when
+no taxon is selected). Typing any letter with nothing focused jumps straight
+into the taxon search box — Rotate/Undo/Can't-determine/Same-as-previous are
+one click away as buttons rather than shortcut letters, so a letter always
+means "start a search." In the search box, type an abbreviation of each word
+(e.g. `dro rot` for *Drosera rotundifolia*, `dact fuch` for *Dactylorhiza
+maculata* subsp. *fuchsii*) and press `Enter` to save that match and move to
+the next photo in one step.
 
 ### Limitations of the browser version
 

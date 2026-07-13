@@ -54,6 +54,7 @@ clean_taxon_name <- function(taxonname) {
 # if it's called something else in your file.
 
 plants_raw <- read.xlsx("/Users/marco/GitHub/tagit/data/Checklist_2017_simple_version_20230503.xlsx", sheet = "data")
+flora_indicativa <- read_csv("/Users/marco/GitHub/_resources_sync/harmonise_eiv_taxonomy/harmonised_eiv_ch_eu_final.csv")
 names(plants_raw) <- make.unique(names(plants_raw))  # guard against duplicate headers, same issue as heugi
 
 # Run this once to find the real name of the status column, then replace

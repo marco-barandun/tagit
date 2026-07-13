@@ -143,10 +143,10 @@
         <div class="grid2">
           <button id="prevBtn" class="btn"><span class="ic-t">←</span> Previous</button>
           <button id="nextBtn" class="btn">Next <span class="ic-t">→</span></button>
-          <button id="rotateBtn" class="btn">Rotate 90° <kbd>r</kbd></button>
-          <button id="undoBtn" class="btn">Undo <kbd>u</kbd></button>
+          <button id="rotateBtn" class="btn">Rotate 90°</button>
+          <button id="undoBtn" class="btn">Undo</button>
           <button id="skipBtn" class="btn">Skip</button>
-          <button id="undetBtn" class="btn">Can’t determine <kbd>i</kbd></button>
+          <button id="undetBtn" class="btn">Can’t determine</button>
         </div>
         <button id="deleteBtn" class="btn btn-danger full">Delete <span class="sub">→ _deleted</span></button>
 
@@ -259,7 +259,8 @@
           <li>This build handles <strong>JPEG</strong> only — RAW/HEIC need the desktop version.</li>
           <li><strong>iNaturalist</strong>: paste a token in the iNaturalist tab, then click <em>Identify with iNaturalist</em> to get AI suggestions (with confidence %) for the current photo (uses its GPS &amp; date).</li>
           <li><strong>Map</strong>: photos with GPS get a <em>Show map</em> control in the photo info; it appears as a small preview in the photo's bottom-right corner — click it to enlarge.</li>
-          <li>Keys: ← → navigate · 1–9 pick a suggestion · r rotate · c copy last · u undo · i can’t-determine · s same as previous · Delete discard.</li>
+          <li>Keys: ← → navigate · 1–9 pick a suggestion · Delete discard (only with nothing selected). Just start typing a letter anywhere to jump into the search box — Rotate/Undo/Can’t-determine/Same-as-previous are one click away as buttons instead of shortcut letters, so a letter key always means “start a search.”</li>
+          <li>In the search box, type an abbreviation of each word — e.g. <code>dro rot</code> for <em>Drosera rotundifolia</em>, <code>dact fuch</code> for <em>Dactylorhiza maculata</em> subsp. <em>fuchsii</em> — then press <strong>Enter</strong> to save that match and move to the next photo in one step. Clicking a suggestion/recently-used chip instead just adds it to the current determination without saving.</li>
         </ul>
       </div>
     </div>
@@ -334,7 +335,7 @@
           <svg viewBox="0 0 24 24" class="ic" aria-hidden="true"><path d="M5 13l4 4L19 7" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
           Save &amp; next
         </button>
-        <button id="copyLastBtn" class="btn btn-ghost full">Copy last caption <kbd>c</kbd></button>
+        <button id="copyLastBtn" class="btn btn-ghost full">Same as previous</button>
       </div>
 
      <div class="panel-scroll">
