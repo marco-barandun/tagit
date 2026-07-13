@@ -37,7 +37,7 @@
     mode: null,            // "fs" (File System Access) or "download"
     rootHandle: null,      // DirectoryHandle in fs mode
     subHandles: {},        // cached status subfolder handles
-    photos: [],            // [{name,status,fileHandle,parentHandle,file,datetime,lat,lon,caption,orientation,url}]
+    photos: [],            // [{name,status,fileHandle,parentHandle,file,datetime,lat,lon,approxLat,approxLon,caption,orientation,url}]
     idx: 0,
     selected: [],          // chosen taxa (chips)
     cf: false,
@@ -60,6 +60,8 @@
     mapVisible: false,     // map toggle (persisted)
     infoVisible: true,     // photo-info panel (map/date/time/caption/keywords) toggle
     watermark: { enabled: false, text: "", position: "br", font: "sans", sizePct: 2.8 },  // optional burned-in watermark
+    perSpeciesFolders: false,  // organize _labelled into one subfolder per species (off by default)
+    lastApproxLocation: null,  // {lat, lon} last manually-picked approximate location (for reuse)
   };
 
   // ---- tiny DOM helpers ----------------------------------------------------
@@ -559,6 +561,7 @@
       const fd = new FormData();
       fd.append("image", img, "photo.jpg");
       if (p.lat != null && p.lon != null) { fd.append("lat", p.lat); fd.append("lng", p.lon); }
+      else if (p.approxLat != null && p.approxLon != null) { fd.append("lat", p.approxLat); fd.append("lng", p.approxLon); }
       if (p.datetime) fd.append("observed_on", isoDate(p.datetime));
       const res = await fetch("https://api.inaturalist.org/v1/computervision/score_image", {
         method: "POST", headers: { Authorization: "Bearer " + token }, body: fd,
@@ -676,7 +679,11 @@
     if (!name) { toast("Pick a taxon for this photo first.", "warn"); return; }
     if (p.inatUrl && !confirm("This photo is already linked to an observation. Create another?")) return;
     const geoLabel = { open: "public", obscured: "obscured", private: "private" }[($("inatGeo") && $("inatGeo").value) || "open"];
-    if (!confirm(`Post an iNaturalist observation for “${name}”?\nCoordinates will be ${geoLabel}.\nThis posts to your public iNaturalist account.`)) return;
+    const hasRealGps = p.lat != null && p.lon != null;
+    const geoNote = hasRealGps ? `Coordinates will be ${geoLabel}.`
+      : (p.approxLat != null ? `No GPS on this photo — using your approximate location (±20 km, ${geoLabel}).`
+      : "No location will be attached (no GPS, and no approximate location picked).");
+    if (!confirm(`Post an iNaturalist observation for “${name}”?\n${geoNote}\nThis posts to your public iNaturalist account.`)) return;
     setBusy("Creating iNaturalist observation…");
     try {
       let taxonId = null;
@@ -690,7 +697,15 @@
       const obs = { species_guess: name, geoprivacy: geo };
       if (p.datetime) obs.observed_on_string = fmtDate(p.datetime);
       if (taxonId) obs.taxon_id = taxonId;
-      if (p.lat != null && p.lon != null) { obs.latitude = p.lat; obs.longitude = p.lon; }
+      if (p.lat != null && p.lon != null) {
+        obs.latitude = p.lat; obs.longitude = p.lon;
+      } else if (p.approxLat != null && p.approxLon != null) {
+        // A manually-picked approximate point, not the photo's real GPS —
+        // positional_accuracy tells iNaturalist to show it as an uncertainty
+        // circle rather than a misleadingly precise pin.
+        obs.latitude = p.approxLat; obs.longitude = p.approxLon;
+        obs.positional_accuracy = APPROX_UNCERTAINTY_M;
+      }
 
       const cr = await fetch("https://api.inaturalist.org/v1/observations", {
         method: "POST", headers: { Authorization: "Bearer " + token, "Content-Type": "application/json" },
@@ -1080,6 +1095,80 @@
     setTimeout(() => map.invalidateSize(), 50);
   }
 
+  // ---- approximate location (photos with no GPS) ----------------------------
+  // iNaturalist's identification and observation-creation both do better with
+  // *some* location — a click-to-place point with a visible 20km uncertainty
+  // circle, so it's clear this isn't the photo's real GPS, just a rough area.
+  const APPROX_UNCERTAINTY_M = 20000;
+  let approxMap = null, approxMarker = null, approxCircle = null;
+  function ensureApproxMap() {
+    if (approxMap) return approxMap;
+    approxMap = L.map("approxLocationMap", { attributionControl: false });
+    addTileLayer(approxMap);
+    L.control.attribution({ prefix: false }).addTo(approxMap);
+    approxMap.on("click", (e) => {
+      const p = current();
+      if (p) setApproxLocation(p, e.latlng.lat, e.latlng.lng);
+    });
+    return approxMap;
+  }
+  function clearApproxDrawing() {
+    if (approxCircle) { approxCircle.remove(); approxCircle = null; }
+    if (approxMarker) { approxMarker.remove(); approxMarker = null; }
+  }
+  function drawApproxPoint(lat, lon) {
+    const map = ensureApproxMap();
+    if (approxCircle) approxCircle.setLatLng([lat, lon]);
+    else approxCircle = L.circle([lat, lon], {
+      radius: APPROX_UNCERTAINTY_M, color: "#e0362f", weight: 1.5, fillColor: "#e0362f", fillOpacity: 0.12,
+    }).addTo(map);
+    if (approxMarker) approxMarker.setLatLng([lat, lon]);
+    else approxMarker = L.circleMarker([lat, lon], MARKER_STYLE).addTo(map);
+  }
+  function updateApproxLocationStatus(p) {
+    const status = $("approxLocationStatus"), clearBtn = $("approxLocationClearBtn"), reuseBtn = $("approxLocationReuseBtn");
+    if (!status) return;
+    const has = p && p.approxLat != null;
+    status.textContent = has
+      ? `Approximate location set (±20 km) — ${p.approxLat.toFixed(3)}, ${p.approxLon.toFixed(3)}`
+      : "No approximate location set.";
+    if (clearBtn) clearBtn.hidden = !has;
+    if (reuseBtn) reuseBtn.hidden = has || !S.lastApproxLocation;
+  }
+  function setApproxLocation(p, lat, lon) {
+    p.approxLat = lat; p.approxLon = lon;
+    S.lastApproxLocation = { lat, lon };
+    LS.set("lastApproxLocation", S.lastApproxLocation);
+    drawApproxPoint(lat, lon);
+    updateApproxLocationStatus(p);
+  }
+  function clearApproxLocation(p) {
+    p.approxLat = null; p.approxLon = null;
+    clearApproxDrawing();
+    updateApproxLocationStatus(p);
+  }
+  function renderApproxLocationBox() {
+    const box = $("approxLocationBox");
+    if (!box) return;
+    const p = current();
+    const hasRealGps = p && p.lat != null && p.lon != null;
+    const modal = $("inatModal");
+    if (!p || hasRealGps || !modal || modal.hidden) { box.hidden = true; return; }
+    box.hidden = false;
+    const map = ensureApproxMap();
+    clearApproxDrawing();
+    if (p.approxLat != null) {
+      map.setView([p.approxLat, p.approxLon], 8);
+      drawApproxPoint(p.approxLat, p.approxLon);
+    } else if (S.lastApproxLocation) {
+      map.setView([S.lastApproxLocation.lat, S.lastApproxLocation.lon], 6);
+    } else {
+      map.setView([20, 0], 2);
+    }
+    updateApproxLocationStatus(p);
+    setTimeout(() => map.invalidateSize(), 0);
+  }
+
   // ---- folder loading ------------------------------------------------------
   async function verifyPermission(handle, write) {
     const opts = { mode: write ? "readwrite" : "read" };
@@ -1186,13 +1275,21 @@
   }
   async function collectFrom(dirHandle, status, out, dirKey = null, stats = null) {
     for await (const [name, h] of dirHandle.entries()) {
-      if (h.kind === "directory") { if (stats && status === "untouched" && !SUBDIR_NAMES.includes(name)) stats.subdirs++; continue; }
+      if (h.kind === "directory") {
+        if (status === "untouched") { if (stats && !SUBDIR_NAMES.includes(name)) stats.subdirs++; continue; }
+        // Inside a status folder (e.g. per-species subfolders under
+        // _labelled), recurse one level so photos organized that way are
+        // still found — regardless of whether that setting is on right now.
+        await collectFrom(h, status, out, dirKey ? `${dirKey}/${name}` : name, stats);
+        continue;
+      }
       if (stats) stats.files++;
       if (IMAGE_RE.test(name)) {
         if (stats) stats.jpeg++;
         out.push({
           name, status, fileHandle: h, parentDir: dirKey, parentHandle: dirHandle,
-          datetime: null, lat: null, lon: null, caption: "", keywords: [], inatUrl: "", orientation: 1, url: null,
+          datetime: null, lat: null, lon: null, approxLat: null, approxLon: null,
+          caption: "", keywords: [], inatUrl: "", orientation: 1, url: null,
         });
       } else if (stats && OTHER_IMG_RE.test(name)) {
         stats.unsupported++;
@@ -1242,7 +1339,8 @@
     $("folderName").textContent = `${files.length} dropped photo${files.length === 1 ? "" : "s"} — captions download as copies`;
     const photos = files.map((file) => ({
       name: file.name, status: "untouched", file, fileHandle: null, parentDir: null, parentHandle: null,
-      datetime: null, lat: null, lon: null, caption: "", keywords: [], inatUrl: "", orientation: 1, url: null,
+      datetime: null, lat: null, lon: null, approxLat: null, approxLon: null,
+      caption: "", keywords: [], inatUrl: "", orientation: 1, url: null,
     }));
     toast(`Loaded ${files.length} JPEG photo${files.length === 1 ? "" : "s"} (download mode).`, "info");
     beginSession(photos);
@@ -1262,9 +1360,16 @@
   async function getFileBytes(p) {
     return new Uint8Array(await (await getFile(p)).arrayBuffer());
   }
-  async function subHandle(dir) {
-    if (!S.subHandles[dir]) S.subHandles[dir] = await S.rootHandle.getDirectoryHandle(dir, { create: true });
-    return S.subHandles[dir];
+  // Gets or creates a (possibly nested) folder under the root, e.g.
+  // subHandle("_labelled", "Drosera rotundifolia") for the per-species option.
+  async function subHandle(...segments) {
+    const key = segments.join("/");
+    if (!S.subHandles[key]) {
+      let dir = S.rootHandle;
+      for (const seg of segments) dir = await dir.getDirectoryHandle(seg, { create: true });
+      S.subHandles[key] = dir;
+    }
+    return S.subHandles[key];
   }
   async function writeBytesTo(dirHandle, name, bytes) {
     const fh = await dirHandle.getFileHandle(name, { create: true });
@@ -1280,15 +1385,28 @@
     setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 1000);
   }
 
+  // Folder names can't contain these on Windows (and some are awkward on
+  // macOS too); collapse whitespace and drop trailing dots while we're at it.
+  function sanitizeFolderName(name) {
+    return (name || "").replace(/[\/\\:*?"<>|]/g, "-").replace(/\s+/g, " ").trim().replace(/\.+$/, "") || "Unknown";
+  }
+
   // Write `bytes` for photo p and move it to `status`. In fs mode this rewrites
   // the file into the status subfolder and removes the original; in download
   // mode it just downloads the modified copy. Returns before/after for undo.
-  async function commit(p, bytes, status) {
+  // `taxa` (the determined species) is only used when saving as "labelled"
+  // with the per-species-folders setting on.
+  async function commit(p, bytes, status, taxa) {
     if (S.mode === "download") {
       if (bytes) downloadBytes(p.name, bytes);
       return { undo: () => {} };
     }
-    const targetDir = STATUS_DIRS[status] || null;         // null = stay at root (untouched)
+    const statusDir = STATUS_DIRS[status] || null;         // null = stay at root (untouched)
+    let segments = statusDir ? [statusDir] : null;
+    if (status === "labelled" && S.perSpeciesFolders && statusDir && taxa && taxa[0]) {
+      segments = [statusDir, sanitizeFolderName(taxa[0].replace(/\s+cf\.\s+/i, " ").trim())];
+    }
+    const targetDir = segments ? segments.join("/") : null;
     const alreadyThere = (p.parentDir || null) === targetDir;
     const srcParent = p.parentHandle, srcName = p.name;
     let destParent, destName = p.name;
@@ -1299,7 +1417,7 @@
       destHandle = bytes ? await writeBytesTo(destParent, destName, bytes)
                          : await destParent.getFileHandle(destName);
     } else {
-      destParent = targetDir ? await subHandle(targetDir) : S.rootHandle;
+      destParent = segments ? await subHandle(...segments) : S.rootHandle;
       destName = await freeName(destParent, p.name);
       const finalBytes = bytes || (await getFileBytes(p));
       destHandle = await writeBytesTo(destParent, destName, finalBytes);
@@ -1460,7 +1578,7 @@
   // origBytes (fs mode only) restores the file's original metadata on undo.
   async function applyStatus(p, status, caption, bytes, taxa, keywords, origBytes) {
     const before = { ...p };
-    const res = await commit(p, bytes, status);
+    const res = await commit(p, bytes, status, taxa);
     let fileUndo = res.undo;
     if (origBytes && S.mode === "fs") {
       const baseUndo = res.undo;
@@ -1669,7 +1787,7 @@
       $("meta").hidden = true; $("meta").innerHTML = "";
       $("statusCorner").textContent = ""; $("statusCorner").hidden = true;
       renderSuggestions(); renderRecent(); renderSelection();
-      renderInat(); renderPhotoControls(); renderInatPhotoStage();
+      renderInat(); renderPhotoControls(); renderInatPhotoStage(); renderApproxLocationBox();
       return;
     }
     // preview
@@ -1934,8 +2052,18 @@
     $("congratsOverlay").addEventListener("click", (e) => { if (e.target.id === "congratsOverlay") hideCongrats(); });
 
     // iNaturalist / Navigate & act: full-height modals opened from a slim row
-    $("inatModalBtn").onclick = () => { openModal("inatModal"); renderInatPhotoStage(); };
+    $("inatModalBtn").onclick = () => { openModal("inatModal"); renderInatPhotoStage(); renderApproxLocationBox(); };
     $("navModalBtn").onclick = () => openModal("navModal");
+
+    // Approximate-location picker (photos with no GPS)
+    if ($("approxLocationClearBtn")) $("approxLocationClearBtn").onclick = () => { const p = current(); if (p) clearApproxLocation(p); };
+    if ($("approxLocationReuseBtn")) $("approxLocationReuseBtn").onclick = () => {
+      const p = current();
+      if (p && S.lastApproxLocation) {
+        setApproxLocation(p, S.lastApproxLocation.lat, S.lastApproxLocation.lon);
+        ensureApproxMap().setView([S.lastApproxLocation.lat, S.lastApproxLocation.lon], 8);
+      }
+    };
 
     // Small corner map preview on the photo — click (or Enter/Space) to enlarge
     $("mapCorner").addEventListener("click", openMapModal);
@@ -2012,6 +2140,13 @@
     $("wmPosition").addEventListener("change", saveWm);
     $("wmFont").addEventListener("change", saveWm);
     $("wmSize").addEventListener("change", saveWm);
+
+    // folder organization
+    $("perSpeciesFolders").checked = S.perSpeciesFolders;
+    $("perSpeciesFolders").addEventListener("change", (e) => {
+      S.perSpeciesFolders = e.target.checked;
+      LS.set("perSpeciesFolders", S.perSpeciesFolders);
+    });
 
     // iNaturalist
     $("inatAskBtn").onclick = inatIdentify;
@@ -2098,6 +2233,8 @@
     S.mapVisible = LS.get("mapVisible", false);
     S.infoVisible = LS.get("infoVisible", true);
     S.watermark = LS.get("watermark", { enabled: false, text: "", position: "br", font: "sans", sizePct: 2.8 });
+    S.perSpeciesFolders = LS.get("perSpeciesFolders", false);
+    S.lastApproxLocation = LS.get("lastApproxLocation", null);
     CFG.suggestionWindowMin = LS.get("windowMin", CFG.suggestionWindowMin);
     CFG.cameraClockOffsetHours = LS.get("clockOffset", CFG.cameraClockOffsetHours);
   }

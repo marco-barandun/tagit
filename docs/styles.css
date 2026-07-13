@@ -303,6 +303,21 @@ kbd {
   border-right: 1px solid var(--hair);
 }
 
+/* Approximate-location picker, shown only when the photo has no GPS —
+   a real interactive Leaflet map (pan/zoom to find the area, click to drop
+   a point) with a 20km uncertainty circle, so iNaturalist's identification
+   and any posted observation still get *some* geographic context. */
+.approx-location { display: flex; flex-direction: column; gap: 0; }
+.approx-location-map {
+  height: 200px; border-radius: var(--r-md); overflow: hidden;
+  background: var(--ground); cursor: crosshair;
+}
+.approx-location-row {
+  display: flex; align-items: center; justify-content: space-between; gap: 8px;
+  margin: 8px 0 8px;
+}
+.approx-location-row .hint { margin: 0; }
+
 /* iNaturalist match review — side-by-side compare */
 .match-compare { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
 .match-pane { display: flex; flex-direction: column; gap: 6px; }
