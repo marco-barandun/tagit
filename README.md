@@ -57,6 +57,14 @@ means "start a search." In the search box, type an abbreviation of each word
 maculata* subsp. *fuchsii*) and press `Enter` to save that match and move to
 the next photo in one step.
 
+### Tagging straight from Apple Photos
+
+Instead of opening a folder, click **Connect to Photos** to tag photos
+directly in your Apple Photos library — no export, no import. It talks to a
+small helper app that runs on your own Mac; see
+[`photos-helper/README.md`](photos-helper/README.md) for setup and exactly
+what permissions it asks for and why.
+
 ### Limitations of the browser version
 
 - **JPEG only.** RAW (CR2/NEF/ARW/DNG…) and HEIC can't be viewed or written in a

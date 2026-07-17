@@ -34,10 +34,11 @@
 
   // ---- state ---------------------------------------------------------------
   const S = {
-    mode: null,            // "fs" (File System Access) or "download"
+    mode: null,            // "fs" (File System Access), "download", or "applephotos"
     rootHandle: null,      // DirectoryHandle in fs mode
     subHandles: {},        // cached status subfolder handles
-    photos: [],            // [{name,status,fileHandle,parentHandle,file,datetime,lat,lon,approxLat,approxLon,caption,orientation,url}]
+    applePhotos: { baseUrl: "http://127.0.0.1:8765", token: "", albumTitle: "" },  // local helper connection (token kept in memory only)
+    photos: [],            // [{name,status,fileHandle,parentHandle,file,datetime,lat,lon,approxLat,approxLon,approxUncertaintyM,caption,orientation,url}]
     idx: 0,
     selected: [],          // chosen taxa (chips)
     cf: false,
@@ -52,7 +53,7 @@
     taxonomyCache: new Map(),      // id -> records[] {taxon, family, attrs}
     obs: [],               // [{species, datetime:Date, locality}]
     sessionFamilies: new Map(),
-    statusFilter: new Set(["untouched", "labelled", "skipped", "undetermined", "deleted"]),
+    statusFilter: new Set(["untouched", "preexisting", "labelled", "skipped", "undetermined", "deleted"]),
     metaToken: 0,          // invalidates in-flight background metadata reads on reload
     inatToken: "",         // iNaturalist API token (browser-only)
     inatResults: [],       // last CV suggestions
@@ -61,7 +62,9 @@
     infoVisible: true,     // photo-info panel (map/date/time/caption/keywords) toggle
     watermark: { enabled: false, text: "", position: "br", font: "sans", sizePct: 2.8 },  // optional burned-in watermark
     perSpeciesFolders: false,  // organize _labelled into one subfolder per species (off by default)
-    lastApproxLocation: null,  // {lat, lon} last manually-picked approximate location (for reuse)
+    lastApproxLocation: null,  // {lat, lon, radiusM} last manually-picked approximate location (for reuse)
+    estimateTarget: null,      // photo the estimate-location modal is currently reviewing
+    estimateResult: null,      // {lat, lon, method, basis} pending confirmation
   };
 
   // ---- tiny DOM helpers ----------------------------------------------------
@@ -195,6 +198,50 @@
     if (!p || !p.keywords || !p.keywords.length) return [];
     const auto = new Set(autoKeywords(taxaFromCaption(p.caption)).map((k) => k.toLowerCase()));
     return p.keywords.filter((k) => !auto.has(k.toLowerCase()));
+  }
+  // Same auto+manual merge doSave() uses, just sourcing "manual" from the
+  // photo's own existing keywords instead of the (single, currently-focused)
+  // keywords box — needed for a bulk pass across many photos at once.
+  function recomputedKeywordsFor(p, taxa) {
+    const kws = autoKeywords(taxa);
+    for (const m of manualKeywordsFromPhoto(p)) {
+      if (!kws.some((k) => k.toLowerCase() === m.toLowerCase())) kws.push(m);
+    }
+    return kws;
+  }
+  // Setup & tools: "Refresh keywords for already-captioned photos" — re-derive
+  // genus/species/family/attribute keywords from the current taxonomy for
+  // every photo that already has a real caption (skips "Indet." — there's no
+  // taxon to derive anything from), previewing the change count before
+  // writing anything.
+  async function refreshAllKeywords() {
+    const candidates = S.photos.filter((p) => p.caption && p.caption !== CFG.undeterminedCaption);
+    if (!candidates.length) { toast("No captioned photos here to check.", "info", 4500); return; }
+    const updates = [];
+    for (const p of candidates) {
+      const taxa = taxaFromCaption(p.caption);
+      if (!taxa.length) continue;
+      const next = recomputedKeywordsFor(p, taxa);
+      const norm = (arr) => arr.map((k) => k.toLowerCase()).sort().join("|");
+      if (norm(p.keywords || []) !== norm(next)) updates.push({ p, next });
+    }
+    if (!updates.length) { toast(`Checked ${candidates.length} captioned photo(s) — keywords are already up to date.`, "info", 6000); return; }
+    const preview = updates.slice(0, 8).map((u) => `• ${u.p.name}`).join("\n");
+    const more = updates.length > 8 ? `\n…and ${updates.length - 8} more` : "";
+    if (!confirm(`Update keywords on ${updates.length} of ${candidates.length} captioned photo(s), based on the current taxonomy?\n${preview}${more}`)) return;
+    setBusy("Updating keywords…");
+    let n = 0;
+    try {
+      for (const { p, next } of updates) {
+        try {
+          await writeCaptionKeywords(p, p.caption, next, p.inatUrl);
+          p.keywords = next; p.url = null;
+          n++;
+        } catch (e) { console.warn("keyword refresh failed for", p.name, e); }
+      }
+      render();
+      toast(`Updated keywords on ${n} of ${updates.length} photo(s).`, "info", 6000);
+    } finally { setBusy(null); }
   }
   function taxaFromCaption(caption) {
     if (!caption) return [];
@@ -591,7 +638,11 @@
     if (!sugg.length) return;
     sugg.forEach((s) => box.append(el("button", {
       className: "chip-btn", title: "Add to determination",
-      onclick: () => { addTaxon(s.name); if (!S.choices.includes(s.name)) { S.choices.push(s.name); S.choices.sort((a, b) => a.localeCompare(b)); } },
+      onclick: () => {
+        addTaxon(s.name);
+        updateCaptionBox();   // refresh the caption box even if this taxon was already selected
+        if (!S.choices.includes(s.name)) { S.choices.push(s.name); S.choices.sort((a, b) => a.localeCompare(b)); }
+      },
     }, [
       el("span", { className: "chip-name", textContent: s.name }),
       ...(s.score != null ? [el("span", { className: "chip-score", textContent: Math.round(s.score) + "%" })] : []),
@@ -617,7 +668,7 @@
       meta.append(el("div", { textContent: "Date: " + fmtDay(p.datetime) }));
       meta.append(el("div", { textContent: "Time: " + fmtTime(p.datetime) }));
     } else meta.append(el("div", { textContent: "Date taken: unknown" }));
-    meta.append(el("div", { textContent: p.caption ? "Caption: " + p.caption : "No caption yet" }));
+    meta.append(captionRow(p));
     if (p.keywords && p.keywords.length) {
       meta.append(el("div", { className: "meta-overlay-kw", textContent: p.keywords.join(" · ") }));
     }
@@ -681,7 +732,7 @@
     const geoLabel = { open: "public", obscured: "obscured", private: "private" }[($("inatGeo") && $("inatGeo").value) || "open"];
     const hasRealGps = p.lat != null && p.lon != null;
     const geoNote = hasRealGps ? `Coordinates will be ${geoLabel}.`
-      : (p.approxLat != null ? `No GPS on this photo — using your approximate location (±20 km, ${geoLabel}).`
+      : (p.approxLat != null ? `No GPS on this photo — using your approximate location (±${fmtRadius(p.approxUncertaintyM)}, ${geoLabel}).`
       : "No location will be attached (no GPS, and no approximate location picked).");
     if (!confirm(`Post an iNaturalist observation for “${name}”?\n${geoNote}\nThis posts to your public iNaturalist account.`)) return;
     setBusy("Creating iNaturalist observation…");
@@ -704,7 +755,7 @@
         // positional_accuracy tells iNaturalist to show it as an uncertainty
         // circle rather than a misleadingly precise pin.
         obs.latitude = p.approxLat; obs.longitude = p.approxLon;
-        obs.positional_accuracy = APPROX_UNCERTAINTY_M;
+        obs.positional_accuracy = p.approxUncertaintyM;
       }
 
       const cr = await fetch("https://api.inaturalist.org/v1/observations", {
@@ -727,20 +778,31 @@
           { method: "POST", headers: { Authorization: "Bearer " + token }, body: fd });
       } catch (e) { console.warn("photo upload to iNaturalist failed", e); }
 
-      p.inatUrl = url;                                       // link it into the photo's metadata
       // Use the taxa just posted (not p.caption) — if the photo hasn't been
       // saved yet in this session, p.caption is still empty and would silently
       // wipe the caption while still creating a real iNaturalist observation.
       const caption = composeForTaxa(taxa) || p.caption || "";
       const keywords = keywordsForSave(taxa);
-      const bytes = TagMeta.writeCaption(await getFileBytes(p), caption, keywords, url);
-      await rewritePhotoBytes(p, bytes);
+      await writeCaptionKeywords(p, caption, keywords, url);
+      p.inatUrl = url;                                       // link it into the photo's metadata
       p.caption = caption; p.keywords = keywords;
       render();
-      toast("Observation created and linked to the photo.", "info", 6000);
+      showInatCelebration(url);
     } catch (e) {
       console.error(e); toast("iNaturalist observation failed: " + (e.message || e) + ".", "warn", 9000);
     } finally { setBusy(null); }
+  }
+
+  // A small moment of celebration when an observation goes live — posting to
+  // iNaturalist is the payoff of the whole workflow, not just another save.
+  let inatCelebrateTimer = null;
+  function showInatCelebration(url) {
+    const box = $("inatCelebrate");
+    if (!box) { toast("Observation created and linked to the photo.", "info", 6000); return; }
+    $("inatCelebrateLink").href = url;
+    box.hidden = false;
+    clearTimeout(inatCelebrateTimer);
+    inatCelebrateTimer = setTimeout(() => { box.hidden = true; }, 6000);
   }
 
   // Check every linked photo: if its observation is research grade with a
@@ -775,8 +837,7 @@
       for (const { p, taxon } of updates) {
         const caption = composeCaption(taxon, familyFor(taxon));
         const keywords = autoKeywords([taxon]);
-        const bytes = TagMeta.writeCaption(await getFileBytes(p), caption, keywords, p.inatUrl);
-        await rewritePhotoBytes(p, bytes);
+        await writeCaptionKeywords(p, caption, keywords, p.inatUrl);
         p.caption = caption; p.keywords = keywords;
         n++;
       }
@@ -987,12 +1048,17 @@
       const caption = taxonName ? composeCaption(taxonName, familyFor(taxonName)) : CFG.undeterminedCaption;
       const keywords = taxonName ? autoKeywords([taxonName]) : [];
       p.inatUrl = cand.o.uri;
-      const origBytes = S.mode === "fs" ? await getFileBytes(p) : null;
-      const bytes = await composeSaveBytes(p, caption, keywords);
       // No taxon on the matched observation yet ("Unknown"/unidentified) — file
       // it as undetermined rather than labelled, so the status badge matches
       // the "Indet." caption instead of implying a real determination.
-      await applyStatus(p, taxonName ? "labelled" : "undetermined", caption, bytes, taxonName ? [taxonName] : null, keywords, origBytes);
+      const nextStatus = taxonName ? "labelled" : "undetermined";
+      if (S.mode === "applephotos") {
+        await applyStatus(p, nextStatus, caption, null, taxonName ? [taxonName] : null, keywords, null);
+      } else {
+        const origBytes = S.mode === "fs" ? await getFileBytes(p) : null;
+        const bytes = await composeSaveBytes(p, caption, keywords);
+        await applyStatus(p, nextStatus, caption, bytes, taxonName ? [taxonName] : null, keywords, origBytes);
+      }
       S.matchSummary.linked++;
     } catch (e) {
       console.error(e); toast("Couldn’t link this photo: " + (e.message || e), "warn", 7000);
@@ -1095,20 +1161,181 @@
     setTimeout(() => map.invalidateSize(), 50);
   }
 
+  // ---- estimate location from nearby (in time) GPS-tagged photos -----------
+  // For a photo with no GPS: find the closest-in-time photos in this folder
+  // that DO have real GPS, treat them as a little track, and interpolate (or,
+  // if this photo falls outside all of them in time, extrapolate) a position.
+  // Confirming writes it into the photo's real EXIF GPS — unlike the
+  // approximate-location picker, which is deliberately never written to the
+  // file since it's just a rough hint for iNaturalist.
+  function haversineM(lat1, lon1, lat2, lon2) {
+    const R = 6371000, toRad = (d) => (d * Math.PI) / 180;
+    const dLat = toRad(lat2 - lat1), dLon = toRad(lon2 - lon1);
+    const a = Math.sin(dLat / 2) ** 2 + Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLon / 2) ** 2;
+    return 2 * R * Math.asin(Math.sqrt(a));
+  }
+  // Only real GPS (never approxLat/approxLon — that's a manual, low-confidence
+  // hint, not something to chain further estimates off of) counts as a track point.
+  function estimateLocationFor(p) {
+    if (!p || !p.datetime) return null;
+    const tracked = S.photos
+      .filter((q) => q !== p && q.datetime && q.lat != null && q.lon != null)
+      .sort((a, b) => a.datetime - b.datetime);
+    if (!tracked.length) return null;
+    const t = p.datetime.getTime();
+
+    let idx = tracked.findIndex((q) => q.datetime.getTime() > t);
+    if (idx === -1) idx = tracked.length;
+    const beforePts = tracked.slice(Math.max(0, idx - 2), idx);   // up to 2, ascending, both < t
+    const afterPts = tracked.slice(idx, idx + 2);                 // up to 2, ascending, both > t
+    const lerp = (a, b, f) => a + (b - a) * f;
+
+    if (beforePts.length && afterPts.length) {
+      const b = beforePts[beforePts.length - 1], a = afterPts[0];
+      const bt = b.datetime.getTime(), at = a.datetime.getTime();
+      const f = at === bt ? 0 : (t - bt) / (at - bt);
+      return { lat: lerp(b.lat, a.lat, f), lon: lerp(b.lon, a.lon, f), method: "interpolated", basis: [b, a] };
+    }
+    if (beforePts.length >= 2) {
+      const [b1, b2] = beforePts;                                 // b2 is the closer one
+      const dt = b2.datetime.getTime() - b1.datetime.getTime();
+      const f = dt === 0 ? 0 : (t - b2.datetime.getTime()) / dt;
+      return { lat: lerp(b1.lat, b2.lat, 1 + f), lon: lerp(b1.lon, b2.lon, 1 + f), method: "extrapolated", basis: [b1, b2] };
+    }
+    if (afterPts.length >= 2) {
+      const [a1, a2] = afterPts;                                  // a1 is the closer one
+      const dt = a2.datetime.getTime() - a1.datetime.getTime();
+      const f = dt === 0 ? 0 : (a1.datetime.getTime() - t) / dt;
+      return { lat: lerp(a2.lat, a1.lat, 1 + f), lon: lerp(a2.lon, a1.lon, 1 + f), method: "extrapolated", basis: [a1, a2] };
+    }
+    const only = beforePts[0] || afterPts[0];
+    return { lat: only.lat, lon: only.lon, method: "nearest", basis: [only] };
+  }
+  function describeEstimate(p, est) {
+    const parts = est.basis.map((b) => {
+      const gapMin = Math.round(Math.abs(p.datetime - b.datetime) / 60000);
+      return `“${b.name}” (${fmtTime(b.datetime)}, ${gapMin} min away)`;
+    });
+    // How far apart the two basis photos actually are — a useful sanity check
+    // on the interpolation/extrapolation (a big distance over a short time
+    // gap means whoever was carrying the camera was moving fast, so trust
+    // the estimate less).
+    const distNote = est.basis.length === 2
+      ? ` They're ${fmtRadius(Math.round(haversineM(est.basis[0].lat, est.basis[0].lon, est.basis[1].lat, est.basis[1].lon)))} apart.`
+      : "";
+    if (est.method === "interpolated") return `Interpolated between ${parts.join(" and ")}.${distNote}`;
+    if (est.method === "extrapolated") return `Extrapolated from the trend between ${parts.join(" and ")} — no photo brackets this one in time, so treat this as a rougher guess.${distNote}`;
+    return `Based on the single nearest dated, GPS-tagged photo: ${parts[0]} — no trend available, so this just reuses its position.`;
+  }
+  let estimateMap = null, estimateLayer = null;
+  function ensureEstimateMap() {
+    if (estimateMap) return estimateMap;
+    estimateMap = L.map("estimateLocationMap");
+    addTileLayer(estimateMap);
+    return estimateMap;
+  }
+  function openEstimateLocationModal() {
+    const p = current();
+    if (!p) return;
+    if (!p.datetime) { toast("This photo has no date/time, so it can't be matched against nearby photos.", "warn", 6000); return; }
+    const est = estimateLocationFor(p);
+    if (!est) { toast("No other dated, GPS-tagged photos in this folder to estimate from.", "info", 6000); return; }
+    S.estimateTarget = p; S.estimateResult = est;
+
+    openModal("estimateLocationModal");
+    const map = ensureEstimateMap();
+    if (estimateLayer) { estimateLayer.remove(); estimateLayer = null; }
+    const group = L.layerGroup();
+    const points = est.basis.map((b) => [b.lat, b.lon]);
+    if (points.length > 1) L.polyline(points, { color: "#4a90d9", weight: 2, dashArray: "5,6" }).addTo(group);
+    est.basis.forEach((b) => {
+      L.circleMarker([b.lat, b.lon], { radius: 6, color: "#fff", weight: 2, fillColor: "#4a90d9", fillOpacity: 1 })
+        .bindTooltip(`${b.name} — ${fmtTime(b.datetime)}`)
+        .addTo(group);
+    });
+    L.circleMarker([est.lat, est.lon], MARKER_STYLE).addTo(group);
+    estimateLayer = group.addTo(map);
+    // With only one basis point, est.lat/lon equals it exactly — a
+    // zero-size bounds, which would make fitBounds zoom in to the max
+    // level instead of a sensible overview.
+    if (points.length > 1) {
+      map.fitBounds(L.latLngBounds([...points, [est.lat, est.lon]]).pad(0.35));
+    } else {
+      map.setView([est.lat, est.lon], 14);
+    }
+    setTimeout(() => map.invalidateSize(), 50);
+
+    $("estimateLocationExplain").textContent = describeEstimate(p, est);
+  }
+  async function confirmEstimatedLocation() {
+    const p = S.estimateTarget, est = S.estimateResult;
+    if (!p || !est) return;
+    if (S.mode === "applephotos") { toast("Writing an estimated location isn't available for Photos library images yet.", "info", 5000); closeModal("estimateLocationModal"); return; }
+    setBusy("Writing location…");
+    try {
+      const bytes = TagMeta.writeGps(await getFileBytes(p), est.lat, est.lon);
+      if (S.mode === "download") downloadBytes(p.name, bytes);
+      else p.fileHandle = await writeBytesTo(p.parentHandle, p.name, bytes);
+      p.lat = est.lat; p.lon = est.lon; p.url = null;
+      closeModal("estimateLocationModal");
+      S.estimateTarget = null; S.estimateResult = null;
+      render();
+      toast("Location written to the photo.", "info");
+    } catch (e) {
+      console.error(e); toast("Couldn't write the location: " + (e.message || e), "warn", 7000);
+    } finally { setBusy(null); }
+  }
+  function estimateLocationRow() {
+    const btn = el("button", { id: "estimateLocBtn", className: "meta-map-btn", textContent: "Estimate location…" });
+    btn.onclick = openEstimateLocationModal;
+    return btn;
+  }
+
   // ---- approximate location (photos with no GPS) ----------------------------
   // iNaturalist's identification and observation-creation both do better with
-  // *some* location — a click-to-place point with a visible 20km uncertainty
+  // *some* location — a click-to-place point with a visible uncertainty
   // circle, so it's clear this isn't the photo's real GPS, just a rough area.
-  const APPROX_UNCERTAINTY_M = 20000;
+  // Zooming in suggests a tighter precision automatically; the dropdown sets
+  // it directly and always wins over the auto-suggestion until you zoom again.
+  const APPROX_RADIUS_OPTIONS = [25, 50, 100, 250, 500, 1000, 2000, 5000, 10000, 20000, 50000, 100000, 250000];
+  function fmtRadius(m) {
+    return m >= 1000 ? `${+(m / 1000).toFixed(1)} km` : `${m} m`;
+  }
+  // Coarse zoom (whole country/continent visible) = wide, uncertain area;
+  // tight zoom (streets/buildings visible) = a small radius.
+  function radiusForZoom(zoom) {
+    if (zoom >= 19) return 25;
+    if (zoom >= 17) return 100;
+    if (zoom >= 15) return 250;
+    if (zoom >= 13) return 1000;
+    if (zoom >= 11) return 5000;
+    if (zoom >= 9) return 10000;
+    if (zoom >= 7) return 20000;
+    if (zoom >= 5) return 50000;
+    if (zoom >= 3) return 100000;
+    return 250000;
+  }
   let approxMap = null, approxMarker = null, approxCircle = null;
   function ensureApproxMap() {
     if (approxMap) return approxMap;
     approxMap = L.map("approxLocationMap", { attributionControl: false });
     addTileLayer(approxMap);
     L.control.attribution({ prefix: false }).addTo(approxMap);
+    const select = $("approxPrecisionSelect");
+    if (select && !select.children.length) {
+      APPROX_RADIUS_OPTIONS.forEach((m) => select.append(el("option", { value: String(m), textContent: fmtRadius(m) })));
+    }
     approxMap.on("click", (e) => {
       const p = current();
-      if (p) setApproxLocation(p, e.latlng.lat, e.latlng.lng);
+      if (!p) return;
+      const radius = select ? +select.value : radiusForZoom(approxMap.getZoom());
+      setApproxLocation(p, e.latlng.lat, e.latlng.lng, radius);
+    });
+    // Only nudges the *suggestion* shown in the dropdown — an already-placed
+    // point's radius doesn't change just because you panned around to look
+    // at something else; it only changes on the next click or manual pick.
+    approxMap.on("zoomend", () => {
+      if (select) select.value = String(radiusForZoom(approxMap.getZoom()));
     });
     return approxMap;
   }
@@ -1116,11 +1343,11 @@
     if (approxCircle) { approxCircle.remove(); approxCircle = null; }
     if (approxMarker) { approxMarker.remove(); approxMarker = null; }
   }
-  function drawApproxPoint(lat, lon) {
+  function drawApproxPoint(lat, lon, radiusM) {
     const map = ensureApproxMap();
-    if (approxCircle) approxCircle.setLatLng([lat, lon]);
+    if (approxCircle) approxCircle.setLatLng([lat, lon]).setRadius(radiusM);
     else approxCircle = L.circle([lat, lon], {
-      radius: APPROX_UNCERTAINTY_M, color: "#e0362f", weight: 1.5, fillColor: "#e0362f", fillOpacity: 0.12,
+      radius: radiusM, color: "#e0362f", weight: 1.5, fillColor: "#e0362f", fillOpacity: 0.12,
     }).addTo(map);
     if (approxMarker) approxMarker.setLatLng([lat, lon]);
     else approxMarker = L.circleMarker([lat, lon], MARKER_STYLE).addTo(map);
@@ -1130,20 +1357,22 @@
     if (!status) return;
     const has = p && p.approxLat != null;
     status.textContent = has
-      ? `Approximate location set (±20 km) — ${p.approxLat.toFixed(3)}, ${p.approxLon.toFixed(3)}`
+      ? `Approximate location set (±${fmtRadius(p.approxUncertaintyM)}) — ${p.approxLat.toFixed(3)}, ${p.approxLon.toFixed(3)}`
       : "No approximate location set.";
     if (clearBtn) clearBtn.hidden = !has;
     if (reuseBtn) reuseBtn.hidden = has || !S.lastApproxLocation;
   }
-  function setApproxLocation(p, lat, lon) {
-    p.approxLat = lat; p.approxLon = lon;
-    S.lastApproxLocation = { lat, lon };
+  function setApproxLocation(p, lat, lon, radiusM) {
+    p.approxLat = lat; p.approxLon = lon; p.approxUncertaintyM = radiusM;
+    S.lastApproxLocation = { lat, lon, radiusM };
     LS.set("lastApproxLocation", S.lastApproxLocation);
-    drawApproxPoint(lat, lon);
+    drawApproxPoint(lat, lon, radiusM);
+    const select = $("approxPrecisionSelect");
+    if (select) select.value = String(radiusM);
     updateApproxLocationStatus(p);
   }
   function clearApproxLocation(p) {
-    p.approxLat = null; p.approxLon = null;
+    p.approxLat = null; p.approxLon = null; p.approxUncertaintyM = null;
     clearApproxDrawing();
     updateApproxLocationStatus(p);
   }
@@ -1156,14 +1385,18 @@
     if (!p || hasRealGps || !modal || modal.hidden) { box.hidden = true; return; }
     box.hidden = false;
     const map = ensureApproxMap();
+    const select = $("approxPrecisionSelect");
     clearApproxDrawing();
     if (p.approxLat != null) {
       map.setView([p.approxLat, p.approxLon], 8);
-      drawApproxPoint(p.approxLat, p.approxLon);
+      drawApproxPoint(p.approxLat, p.approxLon, p.approxUncertaintyM);
+      if (select) select.value = String(p.approxUncertaintyM);
     } else if (S.lastApproxLocation) {
       map.setView([S.lastApproxLocation.lat, S.lastApproxLocation.lon], 6);
+      if (select) select.value = String(radiusForZoom(map.getZoom()));
     } else {
       map.setView([20, 0], 2);
+      if (select) select.value = String(radiusForZoom(map.getZoom()));
     }
     updateApproxLocationStatus(p);
     setTimeout(() => map.invalidateSize(), 0);
@@ -1193,11 +1426,21 @@
     if (!(await verifyPermission(handle, true))) return;
     await useFolder(handle);
   }
+  // The Delete button's "→ _deleted" sub-label describes a folder move that
+  // only happens in fs/download mode — Apple Photos mode just hides the photo
+  // behind a marker keyword instead, so the label needs to say that.
+  function updateDeleteLabel() {
+    const sub = document.querySelector("#deleteBtn .sub");
+    if (sub) sub.textContent = S.mode === "applephotos" ? "→ hidden" : "→ _deleted";
+  }
+
   async function useFolder(handle) {
     S.mode = "fs";
     S.rootHandle = handle;
     S.subHandles = {};
+    S.applePhotos.token = "";
     $("folderName").textContent = handle.name;
+    updateDeleteLabel();
     await scanAndLoad();
   }
 
@@ -1237,7 +1480,11 @@
     S.inatResults = []; S.inatResultsFor = null;
     clearSelection();
     render();
-    if (photos.length) loadMetaInBackground(photos);
+    // Apple Photos mode already gets datetime/GPS/caption/keywords from the
+    // helper (authoritative — AppleScript/PhotosKit, not the file bytes), and
+    // its images may carry no EXIF at all (demo mode) — re-reading EXIF here
+    // would just blank those fields out or fight with the real values.
+    if (photos.length && S.mode !== "applephotos") loadMetaInBackground(photos);
   }
 
   function withTimeout(promise, ms) {
@@ -1288,7 +1535,7 @@
         if (stats) stats.jpeg++;
         out.push({
           name, status, fileHandle: h, parentDir: dirKey, parentHandle: dirHandle,
-          datetime: null, lat: null, lon: null, approxLat: null, approxLon: null,
+          datetime: null, lat: null, lon: null, approxLat: null, approxLon: null, approxUncertaintyM: null,
           caption: "", keywords: [], inatUrl: "", orientation: 1, url: null,
         });
       } else if (stats && OTHER_IMG_RE.test(name)) {
@@ -1324,6 +1571,326 @@
     $("folderName").textContent = `${folder} — no JPEGs found`;
     toast(msg, "warn", 10000);
   }
+  // ---- Apple Photos source (via the local tagit Photos Helper) -------------
+  // A third source alongside "fs" and "download": photos picked from the
+  // user's real Photos library through Apple's Limited Photos Access picker,
+  // served by a tiny helper app running on 127.0.0.1. Photos has no folder-
+  // move concept, so status ("labelled"/"skipped"/…) is instead tracked with
+  // reserved keywords written back alongside the real caption/keywords — never
+  // shown to the user, stripped before display, re-applied on save. The linked
+  // iNaturalist observation (normally stashed in XMP, which this source never
+  // writes) is tracked the same way.
+  const APPLE_PHOTOS_STATUS_KW = {
+    labelled: "tagit:labelled", skipped: "tagit:skipped",
+    undetermined: "tagit:undetermined", deleted: "tagit:deleted",
+  };
+  const INAT_KW_PREFIX = "tagit:inat:";
+  function statusFromKeywords(keywords) {
+    for (const [status, kw] of Object.entries(APPLE_PHOTOS_STATUS_KW)) if (keywords.includes(kw)) return status;
+    return "untouched";
+  }
+  function stripReservedKeywords(keywords) {
+    const marks = new Set(Object.values(APPLE_PHOTOS_STATUS_KW));
+    return (keywords || []).filter((k) => !marks.has(k) && !k.startsWith(INAT_KW_PREFIX));
+  }
+  function inatUrlFromKeywords(keywords) {
+    const kw = (keywords || []).find((k) => k.startsWith(INAT_KW_PREFIX));
+    return kw ? `https://www.inaturalist.org/observations/${kw.slice(INAT_KW_PREFIX.length)}` : "";
+  }
+  function withReservedKeywords(keywords, status, inatUrl) {
+    const clean = stripReservedKeywords(keywords);
+    const mark = APPLE_PHOTOS_STATUS_KW[status];
+    const id = inatIdFromUrl(inatUrl);
+    return [...clean, ...(mark ? [mark] : []), ...(id ? [INAT_KW_PREFIX + id] : [])];
+  }
+
+  async function apFetch(path, opts = {}) {
+    // A hung helper (or one that quit mid-request) must never freeze the UI
+    // forever — 60s is generous even for an iCloud image download.
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), 60000);
+    let res;
+    try {
+      res = await fetch(S.applePhotos.baseUrl + path, {
+        ...opts,
+        headers: { ...(opts.headers || {}), "X-Tagit-Token": S.applePhotos.token },
+        signal: ctrl.signal,
+      });
+    } catch (e) {
+      throw new Error(e && e.name === "AbortError"
+        ? "the helper took too long to respond"
+        : "could not reach the helper — is it running?");
+    } finally { clearTimeout(timer); }
+    if (!res.ok) {
+      let msg = "HTTP " + res.status;
+      try { const j = await res.json(); if (j.error) msg = j.error; } catch { /* not JSON */ }
+      throw new Error(msg);
+    }
+    return res;
+  }
+
+  // Persist caption+keywords(+inatUrl, +status) to the current source, used by
+  // the iNaturalist create/sync/refresh helpers which write outside of the
+  // main Save/Skip/Undetermined/Delete flow (that flow goes through
+  // applyStatus/commit instead).
+  async function writeCaptionKeywords(p, caption, keywords, inatUrl) {
+    if (S.mode === "applephotos") {
+      const wire = withReservedKeywords(keywords, p.status, inatUrl != null ? inatUrl : p.inatUrl);
+      await apFetch(`/photos/${encodeURIComponent(p.assetId)}/caption`, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ caption, keywords: wire }),
+      });
+    } else {
+      const bytes = TagMeta.writeCaption(await getFileBytes(p), caption, keywords, inatUrl || "");
+      await rewritePhotoBytes(p, bytes);
+    }
+  }
+
+  // Write caption/keywords/status to the helper and return an undo() closure —
+  // the applephotos counterpart to commit() (which only handles fs/download).
+  async function commitApplePhotos(p, status, caption, keywords) {
+    const prev = { caption: p.caption, keywords: p.keywords.slice(), status: p.status, inatUrl: p.inatUrl };
+    const nextCaption = caption != null ? caption : p.caption;
+    const nextKeywords = keywords != null ? keywords : p.keywords;
+    const wire = withReservedKeywords(nextKeywords, status, p.inatUrl);
+    await apFetch(`/photos/${encodeURIComponent(p.assetId)}/caption`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ caption: nextCaption, keywords: wire }),
+    });
+    return {
+      undo: async () => {
+        try {
+          const wirePrev = withReservedKeywords(prev.keywords, prev.status, prev.inatUrl);
+          await apFetch(`/photos/${encodeURIComponent(p.assetId)}/caption`, {
+            method: "POST", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ caption: prev.caption, keywords: wirePrev }),
+          });
+        } catch (e) { console.warn("undo failed", e); }
+      },
+    };
+  }
+
+  async function connectToApplePhotos(baseUrl, token) {
+    const prevUrl = S.applePhotos.baseUrl, prevToken = S.applePhotos.token;
+    S.applePhotos.baseUrl = baseUrl; S.applePhotos.token = token;
+    let health;
+    try {
+      const res = await apFetch("/health");
+      health = await res.json();
+    } catch (e) {
+      S.applePhotos.baseUrl = prevUrl; S.applePhotos.token = prevToken;
+      throw e;
+    }
+    if (health.albumSelected) {
+      S.applePhotos.albumTitle = health.album || "Photos";
+      await useApplePhotos();
+    } else {
+      await chooseAlbumFlow();
+    }
+  }
+
+  // The album choice IS the safety boundary in Photos mode (macOS's own
+  // permission dialog is all-or-nothing) — the helper exposes photos from
+  // exactly one album, chosen here, and nothing else. The last-used album is
+  // remembered so reconnecting is one click, not a re-pick every time.
+  async function chooseAlbumFlow(forcePicker = false) {
+    setBusy("Loading your albums…");
+    let albums;
+    try {
+      const res = await apFetch("/albums");
+      albums = (await res.json()).albums;
+    } finally { setBusy(null); }
+    if (!albums || !albums.length) {
+      toast("No albums with photos found in your Photos library — create one in Photos first.", "warn", 9000);
+      return;
+    }
+    if (!forcePicker) {
+      const remembered = LS.get("photosAlbumId", null);
+      const match = remembered && albums.find((a) => a.id === remembered);
+      if (match) {
+        await selectApplePhotosAlbum(match);
+        toast(`Using album “${match.title}” — click Connect to Photos to switch albums.`, "info", 6000);
+        return;
+      }
+    }
+    openAlbumPickerModal(albums);
+  }
+
+  async function selectApplePhotosAlbum(album) {
+    setBusy("Opening album…");
+    try {
+      await apFetch("/album", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ id: album.id }),
+      });
+      LS.set("photosAlbumId", album.id);
+      S.applePhotos.albumTitle = album.title;
+      closeModal("photosAlbumModal");
+      closeModal("photosConnectModal");
+      await useApplePhotos();
+    } finally { setBusy(null); }
+  }
+
+  function openAlbumPickerModal(albums) {
+    const container = $("photosAlbumGrid");
+    container.innerHTML = "";
+    const current = LS.get("photosAlbumId", null);
+    // Thumbnails need the pairing token, so <img src> can't fetch them
+    // directly — and with hundreds of albums, requesting them all at once
+    // would queue minutes of work on the helper. Load each cover only when
+    // its card actually scrolls into view.
+    const thumbObserver = new IntersectionObserver((entries) => {
+      for (const entry of entries) {
+        if (!entry.isIntersecting) continue;
+        thumbObserver.unobserve(entry.target);
+        const { albumId } = entry.target.dataset;
+        apFetch(`/albums/${encodeURIComponent(albumId)}/thumbnail`)
+          .then((r) => r.blob()).then((b) => { entry.target.src = URL.createObjectURL(b); })
+          .catch(() => { /* no local thumbnail — the placeholder background stays */ });
+      }
+    }, { root: container, rootMargin: "300px" });
+
+    // Group albums the way Photos' own sidebar does — by their folder path
+    // (helper already sorts: top-level albums first, then folder by folder).
+    const groups = new Map();
+    for (const a of albums) {
+      const key = a.folder || "";
+      if (!groups.has(key)) groups.set(key, []);
+      groups.get(key).push(a);
+    }
+    for (const [folder, items] of groups) {
+      const grid = el("div", { className: "album-grid" });
+      for (const a of items) {
+        const img = el("img", { alt: "" });
+        img.dataset.albumId = a.id;
+        const card = el("button", { type: "button", className: "album-card" + (a.id === current ? " current" : "") }, [
+          img,
+          el("span", { className: "album-card-title", textContent: a.title }),
+          ...(a.count != null ? [el("span", { className: "album-card-count", textContent: `${a.count} photo${a.count === 1 ? "" : "s"}` })] : []),
+        ]);
+        card.dataset.searchText = (folder + " " + a.title).toLowerCase();
+        card.onclick = () => selectApplePhotosAlbum(a).catch((e) => {
+          toast("Couldn't open that album: " + (e.message || e), "warn", 7000);
+        });
+        grid.append(card);
+        thumbObserver.observe(img);
+      }
+      const group = el("div", { className: "album-group" });
+      if (folder) group.append(el("div", { className: "album-group-title", textContent: folder }));
+      group.append(grid);
+      container.append(group);
+    }
+
+    // With a big album collection, typing beats scrolling — matches the
+    // album name or its folder.
+    const search = $("photosAlbumSearch");
+    if (search) {
+      search.value = "";
+      search.oninput = () => {
+        const q = search.value.trim().toLowerCase();
+        for (const group of container.children) {
+          let any = false;
+          for (const card of group.querySelectorAll(".album-card")) {
+            const show = !q || card.dataset.searchText.includes(q);
+            card.style.display = show ? "" : "none";
+            if (show) any = true;
+          }
+          group.style.display = any ? "" : "none";
+        }
+      };
+    }
+    openModal("photosAlbumModal");
+    if (search) setTimeout(() => search.focus(), 50);
+  }
+
+  function randomPairSecret() {
+    const bytes = new Uint8Array(24);
+    crypto.getRandomValues(bytes);
+    return btoa(String.fromCharCode(...bytes)).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+  }
+
+  // One-click connect: generate the pairing secret HERE, hand it to the
+  // helper inside the launch URL, and poll until the helper (new or already
+  // running — the OS routes the URL to a running instance, which just adopts
+  // the new secret) answers with it. No code to copy. Safe because knowing
+  // the secret alone is not enough: every request must also come from an
+  // allowlisted tagit origin.
+  async function launchHelperAutoPair() {
+    const secret = randomPairSecret();
+    const baseUrl = (($("photosConnectUrl") && $("photosConnectUrl").value.trim()) || "http://127.0.0.1:8765").replace(/\/+$/, "");
+    const hint = $("photosConnectHint");
+    hint.textContent = "Launching the helper… approve the browser's “open app” prompt, and macOS's Photos prompts if they appear.";
+    window.location.href = "tagitphotos://start?pair=" + secret;
+    const deadline = Date.now() + 90000;   // generous — first run includes permission dialogs
+    while (Date.now() < deadline) {
+      await sleep(1000);
+      if ($("photosConnectModal").hidden) return;          // user gave up / closed the dialog
+      if (S.applePhotos.token === secret) return;          // already connected meanwhile
+      try {
+        const ctrl = new AbortController();
+        const t = setTimeout(() => ctrl.abort(), 900);
+        const res = await fetch(baseUrl + "/health", { headers: { "X-Tagit-Token": secret }, signal: ctrl.signal });
+        clearTimeout(t);
+        if (res.ok) {
+          hint.textContent = "Connected — loading your albums…";
+          try {
+            await connectToApplePhotos(baseUrl, secret);
+          } catch (e) {
+            console.error(e);
+            hint.textContent = "Connected to the helper, but then: " + (e.message || e);
+            return;
+          }
+          if (S.mode === "applephotos") closeModal("photosConnectModal");
+          toast("Connected to Photos.", "info", 4000);
+          return;
+        }
+      } catch { /* helper not up yet — keep polling */ }
+    }
+    hint.textContent = "Couldn't connect automatically. If the helper never opened, it needs its one-time setup (see the instructions link). If an older helper is still running from before, quit it and try again — or connect manually below.";
+  }
+  async function useApplePhotos() {
+    S.mode = "applephotos";
+    S.rootHandle = null;
+    $("folderName").textContent = S.applePhotos.albumTitle;
+    updateDeleteLabel();
+    await scanAndLoadApplePhotos();
+  }
+  async function scanAndLoadApplePhotos() {
+    setBusy("Loading photos…");
+    try {
+      const res = await apFetch("/photos");
+      const data = await res.json();
+      const photos = (data.photos || []).map((ap) => {
+        const rawKw = ap.keywords || [];
+        const caption = ap.caption || "";
+        const keywords = stripReservedKeywords(rawKw);
+        let status = statusFromKeywords(rawKw);
+        // A photo tagit hasn't touched (no tagit: marker) but which already
+        // carries a caption or real keywords isn't "untouched" — it was
+        // captioned elsewhere (Photos itself, a previous import, another
+        // tool). Surface it as its own "already tagged" category so it's
+        // visible and filterable, instead of hiding among the blank ones.
+        if (status === "untouched" && (caption.trim() || keywords.length)) status = "preexisting";
+        return {
+          name: ap.filename, status,
+          assetId: ap.id, fileHandle: null, parentDir: null, parentHandle: null,
+          datetime: ap.dateTaken ? new Date(ap.dateTaken) : null,
+          lat: ap.lat != null ? ap.lat : null, lon: ap.lon != null ? ap.lon : null,
+          approxLat: null, approxLon: null, approxUncertaintyM: null,
+          caption, keywords,
+          inatUrl: inatUrlFromKeywords(rawKw), orientation: 1, url: null,
+        };
+      });
+      const n = photos.length;
+      $("folderName").textContent = `${S.applePhotos.albumTitle} — ${n} photo${n === 1 ? "" : "s"}`;
+      toast(`Loaded ${n} photo${n === 1 ? "" : "s"} from Photos.`, "info");
+      beginSession(photos);
+    } catch (e) {
+      console.error(e);
+      toast("Couldn't load photos from the helper: " + (e.message || e), "warn", 8000);
+    } finally { setBusy(null); }
+  }
+
   // ---- drag & drop fallback (download mode) --------------------------------
   function acceptDroppedFiles(fileList) {
     const all = [...fileList];
@@ -1336,10 +1903,12 @@
     }
     S.mode = "download";
     S.rootHandle = null;
+    S.applePhotos.token = "";
+    updateDeleteLabel();
     $("folderName").textContent = `${files.length} dropped photo${files.length === 1 ? "" : "s"} — captions download as copies`;
     const photos = files.map((file) => ({
       name: file.name, status: "untouched", file, fileHandle: null, parentDir: null, parentHandle: null,
-      datetime: null, lat: null, lon: null, approxLat: null, approxLon: null,
+      datetime: null, lat: null, lon: null, approxLat: null, approxLon: null, approxUncertaintyM: null,
       caption: "", keywords: [], inatUrl: "", orientation: 1, url: null,
     }));
     toast(`Loaded ${files.length} JPEG photo${files.length === 1 ? "" : "s"} (download mode).`, "info");
@@ -1354,6 +1923,12 @@
     return p.fileHandle;
   }
   async function getFile(p) {
+    if (S.mode === "applephotos") {
+      if (p._apBlob) return p._apBlob;
+      const res = await apFetch(`/photos/${encodeURIComponent(p.assetId)}/image`);
+      p._apBlob = new File([await res.blob()], p.name, { type: "image/jpeg" });
+      return p._apBlob;
+    }
     if (p.file) return p.file;
     return (await ensureHandle(p)).getFile();
   }
@@ -1578,7 +2153,7 @@
   // origBytes (fs mode only) restores the file's original metadata on undo.
   async function applyStatus(p, status, caption, bytes, taxa, keywords, origBytes) {
     const before = { ...p };
-    const res = await commit(p, bytes, status, taxa);
+    const res = S.mode === "applephotos" ? await commitApplePhotos(p, status, caption, keywords) : await commit(p, bytes, status, taxa);
     let fileUndo = res.undo;
     if (origBytes && S.mode === "fs") {
       const baseUndo = res.undo;
@@ -1646,18 +2221,24 @@
 
   async function finalizeCaptionSave(p, caption, taxa) {
     if (!p) return false;
+    if (S._saving) return false;   // a double-click/double-Enter must not save twice
+    S._saving = true;
     setBusy("Saving…");
     try {
-      const origBytes = S.mode === "fs" ? await getFileBytes(p) : null;
       const keywords = keywordsForSave(taxa);
-      const bytes = await composeSaveBytes(p, caption, keywords);
-      await applyStatus(p, "labelled", caption, bytes, taxa, keywords, origBytes);
+      if (S.mode === "applephotos") {
+        await applyStatus(p, "labelled", caption, null, taxa, keywords, null);
+      } else {
+        const origBytes = S.mode === "fs" ? await getFileBytes(p) : null;
+        const bytes = await composeSaveBytes(p, caption, keywords);
+        await applyStatus(p, "labelled", caption, bytes, taxa, keywords, origBytes);
+      }
       return true;
     } catch (e) {
       console.error(e);
       toast("Couldn’t save this photo: " + (e.message || e), "warn", 7000);
       return false;
-    } finally { setBusy(null); }
+    } finally { S._saving = false; setBusy(null); }
   }
 
   async function doSave() {
@@ -1689,11 +2270,15 @@
     setBusy("Saving…");
     try {
       const keywords = parseManualKeywords($("keywordsBox") && $("keywordsBox").value);
-      const origBytes = S.mode === "fs" ? await getFileBytes(p) : null;
-      let bytes = null;
-      try { bytes = await composeSaveBytes(p, CFG.undeterminedCaption, keywords); }
-      catch (e) { console.warn("caption write failed, moving anyway", e); }
-      await applyStatus(p, "undetermined", CFG.undeterminedCaption, bytes, null, keywords, origBytes);
+      if (S.mode === "applephotos") {
+        await applyStatus(p, "undetermined", CFG.undeterminedCaption, null, null, keywords, null);
+      } else {
+        const origBytes = S.mode === "fs" ? await getFileBytes(p) : null;
+        let bytes = null;
+        try { bytes = await composeSaveBytes(p, CFG.undeterminedCaption, keywords); }
+        catch (e) { console.warn("caption write failed, moving anyway", e); }
+        await applyStatus(p, "undetermined", CFG.undeterminedCaption, bytes, null, keywords, origBytes);
+      }
       advance();
     } catch (e) {
       console.error(e); toast("Couldn’t mark undetermined: " + (e.message || e), "warn", 7000);
@@ -1716,6 +2301,7 @@
   async function rotateCurrent() {
     const p = current();
     if (!p) return;
+    if (S.mode === "applephotos") { toast("Rotating isn't available for Photos library images yet.", "info", 5000); return; }
     setBusy("Rotating…");
     try {
       const { bytes, orientation } = TagMeta.rotateCW(await getFileBytes(p), p.orientation);
@@ -1731,6 +2317,28 @@
   function setCaptionBox(text) {
     if ($("captionBox")) $("captionBox").value = text;
     if ($("inatCaptionBox")) $("inatCaptionBox").value = text;
+  }
+  // Load a photo's existing caption into "Caption to save" (and the selection
+  // behind it) — wired to the caption line shown on the photo, so adopting
+  // what's already there is one click instead of retyping it.
+  function adoptCaption(p) {
+    if (!p || !p.caption) return;
+    S.selected = taxaFromCaption(p.caption);
+    S.cf = /cf\./.test(p.caption);
+    if ($("cfBox")) $("cfBox").checked = S.cf;
+    setCaptionBox(p.caption);
+    renderFamilyBox();
+    toast("Caption loaded into “Caption to save”.", "info", 2200);
+  }
+  // The caption line of the photo-info overlay — clickable when there is one.
+  function captionRow(p) {
+    if (!p.caption) return el("div", { textContent: "No caption yet" });
+    return el("div", {
+      className: "meta-caption-row",
+      textContent: "Caption: " + p.caption,
+      title: "Click to load into “Caption to save”",
+      onclick: () => adoptCaption(p),
+    });
   }
   // ---- selection ------------------------------------------------------------
   function addTaxon(t) {
@@ -1777,6 +2385,10 @@
 
   async function render() {
     const p = current();
+    // The "Already tagged" status only ever occurs in Apple Photos mode —
+    // its filter chip stays out of the folder workflow entirely.
+    const preSeg = document.querySelector(".seg-preexisting");
+    if (preSeg) preSeg.hidden = S.mode !== "applephotos";
     if (S._zoomPhoto !== p) {
       S._zoomPhoto = p; resetZoom();
       if (!$("mapModal").hidden) closeModal("mapModal");  // don't leave the old photo's location showing
@@ -1794,7 +2406,18 @@
     try {
       if (!p.url) p.url = URL.createObjectURL(await getFile(p));
       $("photo").src = p.url;
-    } catch (e) { console.warn("preview failed", e); $("photo").src = ""; }
+    } catch (e) {
+      console.warn("preview failed", e);
+      $("photo").src = "";
+      toast("Couldn't load this photo's image: " + (e.message || e), "warn", 8000);
+    }
+    // Photos-mode images come over HTTP one at a time — quietly warm up the
+    // next visible photo so advancing feels instant.
+    if (S.mode === "applephotos") {
+      const after = visibleIdx().filter((i) => i > S.idx);
+      const next = after.length ? S.photos[after[0]] : null;
+      if (next && !next._apBlob) getFile(next).catch(() => {});
+    }
 
     // Everything about this photo overlays the bottom of the photo itself —
     // filename first, then date/time/locality/caption/keywords/link. Status
@@ -1811,8 +2434,8 @@
     else bits.push("Date taken: unknown");
     const loc = suggestLocality(p.datetime);
     if (loc) bits.push("Locality (log): " + loc);
-    bits.push(p.caption ? "Caption: " + p.caption : "No caption yet");
     for (const b of bits) $("meta").append(el("div", { textContent: b }));
+    $("meta").append(captionRow(p));
     if (p.keywords && p.keywords.length) {
       $("meta").append(el("div", { className: "meta-overlay-kw", textContent: p.keywords.join(" · ") }));
     }
@@ -1822,15 +2445,21 @@
       $("meta").append(d);
     }
     if (p.lat != null && p.lon != null) $("meta").append(mapToggleRow());
+    else if (S.mode !== "applephotos") $("meta").append(estimateLocationRow());
     $("meta").hidden = !S.infoVisible;
 
     renderSuggestions(); renderRecent(); renderSelection();
     renderInat(); renderPhotoControls(); renderInatPhotoStage();
+    // Keep the approximate-location box in sync on every render — without
+    // this, saving/navigating inside the iNaturalist tab left the previous
+    // photo's map showing even on photos that already have GPS.
+    renderApproxLocationBox();
     if (!$("captionBox").value) updateCaptionBox();
   }
 
   const STATUS_LABEL = {
     untouched: { text: "○ untouched", color: "#7a857d" },
+    preexisting: { text: "◑ already tagged", color: "#3b7cc4" },
     labelled: { text: "✓ labelled", color: "#2f8f5b" },
     skipped: { text: "• skipped", color: "#b7791f" },
     undetermined: { text: "? undetermined", color: "#6d5bd0" },
@@ -1841,16 +2470,20 @@
   function fmtDay(d) { return `${d.getFullYear()}-${_p2(d.getMonth() + 1)}-${_p2(d.getDate())}`; }
   function fmtTime(d) { return `${_p2(d.getHours())}:${_p2(d.getMinutes())}`; }
   function renderCounts() {
-    const c = { untouched: 0, labelled: 0, skipped: 0, undetermined: 0, deleted: 0 };
+    const c = { untouched: 0, preexisting: 0, labelled: 0, skipped: 0, undetermined: 0, deleted: 0 };
     for (const p of S.photos) c[p.status]++;
     const total = Math.max(S.photos.length, 1);
     const done = c.labelled + c.skipped + c.deleted;
     $("barDone").style.width = Math.round((100 * done) / total) + "%";
     $("barUndet").style.width = Math.round((100 * c.undetermined) / total) + "%";
+    // "already tagged" only exists in Apple Photos mode — only mention it
+    // when there actually are some, so the folder workflow's text is unchanged.
+    const parts = [`${c.untouched} untouched`];
+    if (c.preexisting) parts.push(`${c.preexisting} already tagged`);
+    parts.push(`${c.labelled} labelled`, `${c.skipped} skipped`,
+               `${c.undetermined} undetermined`, `${c.deleted} deleted`);
     $("progressText").textContent =
-      `${c.untouched} untouched, ${c.labelled} labelled, ${c.skipped} skipped, ` +
-      `${c.undetermined} undetermined, ${c.deleted} deleted ` +
-      `(showing #${S.photos.length ? S.idx + 1 : 0} of ${S.photos.length})`;
+      parts.join(", ") + ` (showing #${S.photos.length ? S.idx + 1 : 0} of ${S.photos.length})`;
   }
   function renderSuggestions() {
     // The whole section stays hidden until an observation log is loaded —
@@ -2018,9 +2651,55 @@
   // =========================================================================
   // Wiring
   // =========================================================================
+  async function onManualConnectClick() {
+    const token = $("photosConnectToken").value.trim();
+    const baseUrl = ($("photosConnectUrl").value.trim() || "http://127.0.0.1:8765").replace(/\/+$/, "");
+    if (!token) { $("photosConnectHint").textContent = "Paste the pairing code from the helper's window first."; return; }
+    $("photosConnectHint").textContent = "Connecting…";
+    try {
+      await connectToApplePhotos(baseUrl, token);
+      if (S.mode === "applephotos") closeModal("photosConnectModal");
+      $("photosConnectToken").value = "";
+      $("photosConnectHint").textContent = "";
+    } catch (e) {
+      console.error(e);
+      $("photosConnectHint").textContent = "Couldn't connect: " + (e.message || e) + " — check the helper is running and the code is correct.";
+    }
+  }
+
+  // Clicking "Connect to Photos" while already connected manages the
+  // connection (change album / disconnect) instead of starting over.
+  function onConnectPhotosButton() {
+    $("photosConnectHint").textContent = "";
+    const connected = S.mode === "applephotos" && S.applePhotos.token;
+    $("photosConnectSetup").hidden = !!connected;
+    $("photosConnectedBox").hidden = !connected;
+    if (connected) $("photosConnectedAlbum").textContent = S.applePhotos.albumTitle || "Photos";
+    openModal("photosConnectModal");
+  }
+
+  async function disconnectApplePhotos() {
+    try { await apFetch("/quit", { method: "POST" }); } catch { /* helper may already be gone */ }
+    S.applePhotos.token = "";
+    S.mode = null;
+    S.photos = []; S.idx = 0; S.undo = null;
+    $("folderName").textContent = "No folder open";
+    updateDeleteLabel();
+    closeModal("photosConnectModal");
+    render();
+    toast("Disconnected — the helper has quit, and access to Photos is closed.", "info", 6000);
+  }
+
   function wireButtons() {
     $("openFolder").onclick = openFolder;
     if ($("emptyOpen")) $("emptyOpen").onclick = openFolder;
+    if ($("connectPhotosBtn")) $("connectPhotosBtn").onclick = onConnectPhotosButton;
+    if ($("photosConnectBtn")) $("photosConnectBtn").onclick = onManualConnectClick;
+    if ($("launchHelperLink")) $("launchHelperLink").onclick = (e) => { e.preventDefault(); launchHelperAutoPair(); };
+    if ($("photosChangeAlbumBtn")) $("photosChangeAlbumBtn").onclick = () => {
+      chooseAlbumFlow(true).catch((e) => toast("Couldn't list albums: " + (e.message || e), "warn", 7000));
+    };
+    if ($("photosDisconnectBtn")) $("photosDisconnectBtn").onclick = disconnectApplePhotos;
     $("saveBtn").onclick = doSave;
     $("copyLastBtn").onclick = saveSameAsPrevious;
     if ($("inatSaveBtn")) $("inatSaveBtn").onclick = doSave;
@@ -2051,6 +2730,12 @@
     $("congratsCloseBtn").onclick = hideCongrats;
     $("congratsOverlay").addEventListener("click", (e) => { if (e.target.id === "congratsOverlay") hideCongrats(); });
 
+    // iNaturalist post celebration
+    if ($("inatCelebrateClose")) $("inatCelebrateClose").onclick = () => { $("inatCelebrate").hidden = true; clearTimeout(inatCelebrateTimer); };
+    if ($("inatCelebrate")) $("inatCelebrate").addEventListener("click", (e) => {
+      if (e.target.id === "inatCelebrate") { $("inatCelebrate").hidden = true; clearTimeout(inatCelebrateTimer); }
+    });
+
     // iNaturalist / Navigate & act: full-height modals opened from a slim row
     $("inatModalBtn").onclick = () => { openModal("inatModal"); renderInatPhotoStage(); renderApproxLocationBox(); };
     $("navModalBtn").onclick = () => openModal("navModal");
@@ -2060,10 +2745,28 @@
     if ($("approxLocationReuseBtn")) $("approxLocationReuseBtn").onclick = () => {
       const p = current();
       if (p && S.lastApproxLocation) {
-        setApproxLocation(p, S.lastApproxLocation.lat, S.lastApproxLocation.lon);
-        ensureApproxMap().setView([S.lastApproxLocation.lat, S.lastApproxLocation.lon], 8);
+        const { lat, lon, radiusM } = S.lastApproxLocation;
+        setApproxLocation(p, lat, lon, radiusM || radiusForZoom(ensureApproxMap().getZoom()));
+        ensureApproxMap().setView([lat, lon], 8);
       }
     };
+    // Changing precision by hand always wins — if a point is already placed,
+    // resize its circle immediately rather than waiting for the next click.
+    if ($("approxPrecisionSelect")) $("approxPrecisionSelect").addEventListener("change", (e) => {
+      const p = current();
+      const radiusM = +e.target.value;
+      if (p && p.approxLat != null) {
+        p.approxUncertaintyM = radiusM;
+        drawApproxPoint(p.approxLat, p.approxLon, radiusM);
+        S.lastApproxLocation = { lat: p.approxLat, lon: p.approxLon, radiusM };
+        LS.set("lastApproxLocation", S.lastApproxLocation);
+        updateApproxLocationStatus(p);
+      }
+    });
+
+    // Estimate location from nearby (in time) GPS-tagged photos
+    $("estimateLocationConfirmBtn").onclick = confirmEstimatedLocation;
+    $("estimateLocationCancelBtn").onclick = () => closeModal("estimateLocationModal");
 
     // Small corner map preview on the photo — click (or Enter/Space) to enlarge
     $("mapCorner").addEventListener("click", openMapModal);
@@ -2079,6 +2782,7 @@
     document.addEventListener("keydown", (e) => {
       if (e.key !== "Escape") return;
       if (!$("congratsOverlay").hidden) hideCongrats();
+      if ($("inatCelebrate") && !$("inatCelebrate").hidden) { $("inatCelebrate").hidden = true; clearTimeout(inatCelebrateTimer); }
       closeAllModals();
     });
     $("prevBtn").onclick = goPrev;
@@ -2108,6 +2812,7 @@
     });
     $("taxAddBtn").onclick = commitTaxonomyUpload;
     $("taxCancelBtn").onclick = cancelTaxonomyUpload;
+    $("refreshKeywordsBtn").onclick = refreshAllKeywords;
 
     // observation log
     $("obsFile").addEventListener("change", async (e) => {
@@ -2172,10 +2877,33 @@
     $("inatGeo").addEventListener("change", (e) => LS.set("inatGeo", e.target.value));
     $("inatToken").value = S.inatToken;
     updateInatStatus();
+    // The token page shows a JSON snippet like {"api_token":"eyJhb…"} — most
+    // people copy the whole thing. Accept that as-is and dig the token out,
+    // so pasting can never be done "wrong".
+    const normalizeInatToken = (raw) => {
+      raw = (raw || "").trim();
+      if (raw.includes("api_token")) {
+        try {
+          const j = JSON.parse(raw);
+          if (j.api_token) return String(j.api_token);
+        } catch {
+          const m = raw.match(/"api_token"\s*:\s*"([^"]+)"/);
+          if (m) return m[1];
+        }
+      }
+      return raw;
+    };
     $("inatToken").addEventListener("input", (e) => {
-      S.inatToken = e.target.value.trim();
+      const clean = normalizeInatToken(e.target.value);
+      if (clean !== e.target.value) e.target.value = clean;
+      S.inatToken = clean;
       LS.set("inatToken", S.inatToken);
       updateInatStatus();
+    });
+    // Pasting a token is a complete gesture — verify it right away instead
+    // of making the user find and press Check too.
+    $("inatToken").addEventListener("paste", () => {
+      setTimeout(() => { if ((S.inatToken || "").length > 40) inatVerify(); }, 50);
     });
 
     // settings
@@ -2201,6 +2929,19 @@
       const tag = (e.target.tagName || "").toLowerCase();
       if (tag === "input" || tag === "textarea" || e.target.isContentEditable) return;
       if (!S.photos.length) return;
+      // Page-level shortcuts stay off while a dialog is open (Setup, Help,
+      // Navigate & act, …) — otherwise a stray letter typed while focus sits
+      // on a button inside one yanks focus to the taxon search box hidden
+      // behind it, and arrows/digits/Delete would act on the background
+      // photo while you're mid-dialog. The one deliberate exception is the
+      // iNaturalist tab: it IS a photo-tagging surface, so navigation and
+      // suggestion shortcuts keep working there (letters still don't grab
+      // the search box, which is hidden behind it).
+      const openOverlay = document.querySelector(".modal-overlay:not([hidden])");
+      const inatOnly = !!openOverlay && openOverlay.id === "inatModal" &&
+        !document.querySelector(".modal-overlay:not([hidden]):not(#inatModal)");
+      const celebration = !$("congratsOverlay").hidden || ($("inatCelebrate") && !$("inatCelebrate").hidden);
+      if ((openOverlay && !inatOnly) || celebration) return;
       const k = e.key;
       // Typing a letter with nothing focused starts a taxon search instead
       // of a stray single-letter shortcut — a species name is what you're
@@ -2208,7 +2949,7 @@
       // as buttons; digits and navigation keys are left alone below since
       // taxon names don't start with those.
       if (/^[a-zA-Z]$/.test(k) && !e.metaKey && !e.ctrlKey && !e.altKey) {
-        $("taxonInput").focus();
+        if (!inatOnly) $("taxonInput").focus();
         return;
       }
       if (k === "ArrowRight") { e.preventDefault(); goNext(); }

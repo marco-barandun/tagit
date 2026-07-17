@@ -231,6 +231,32 @@ const TagMeta = (() => {
     catch (e) { return { bytes: u8, orientation: currentOrientation }; }
   }
 
+  // ---- public: write GPS coordinates into the EXIF GPS IFD -----------------
+  // Used for the "estimate location from nearby photos" feature — writes a
+  // real coordinate (not a fuzzy hint) into the standard EXIF GPS tags, the
+  // same place a camera itself would put it, so any tool reading the file
+  // (including this app's own reader) picks it up normally.
+  function toDMSRational(absDeg) {
+    const d = Math.floor(absDeg);
+    const mFull = (absDeg - d) * 60;
+    const m = Math.floor(mFull);
+    const s = Math.round((mFull - m) * 60 * 10000);
+    return [[d, 1], [m, 1], [s, 10000]];
+  }
+  function writeGps(u8, lat, lon) {
+    const bin = u8ToBinary(u8);
+    let obj;
+    try { obj = piexif.load(bin); }
+    catch (e) { obj = { "0th": {}, Exif: {}, GPS: {}, "1st": {}, thumbnail: null }; }
+    obj.GPS = obj.GPS || {};
+    obj.GPS[piexif.GPSIFD.GPSLatitudeRef] = lat >= 0 ? "N" : "S";
+    obj.GPS[piexif.GPSIFD.GPSLatitude] = toDMSRational(Math.abs(lat));
+    obj.GPS[piexif.GPSIFD.GPSLongitudeRef] = lon >= 0 ? "E" : "W";
+    obj.GPS[piexif.GPSIFD.GPSLongitude] = toDMSRational(Math.abs(lon));
+    const exifStr = piexif.dump(obj);
+    return binaryToU8(piexif.insert(exifStr, bin));
+  }
+
   // ---- public: copy the EXIF block from one JPEG into another --------------
   // Used after watermarking (which re-encodes the pixels and drops EXIF) to
   // restore date/GPS/orientation from the original.
@@ -243,5 +269,5 @@ const TagMeta = (() => {
     } catch (e) { return destU8; }
   }
 
-  return { readMeta, writeCaption, rotateCW, copyExif };
+  return { readMeta, writeCaption, rotateCW, copyExif, writeGps };
 })();

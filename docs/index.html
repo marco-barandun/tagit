@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>tagit — caption plant &amp; animal photos in your browser</title>
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Cpath d='M25 6C13 6 7 13 7 22c0 1 0 2 .3 3C10 18 16 14 22 12c-5 3-9 7-11 14 10 1 16-6 16-16 0-2 0-3-2-4z' fill='%232f6b47'/%3E%3C/svg%3E">
-  <link rel="stylesheet" href="styles.css?v=12">
+  <link rel="stylesheet" href="styles.css?v=16">
   <link rel="stylesheet" href="vendor/leaflet.css">
   <script>
     // Set theme before first paint to avoid a flash.
@@ -33,6 +33,18 @@
       <p id="congratsSub" class="congrats-sub"></p>
       <div id="congratsStats" class="congrats-stats"></div>
       <button id="congratsCloseBtn" class="btn btn-primary full">Keep going</button>
+    </div>
+  </div>
+
+  <div id="inatCelebrate" class="congrats-overlay" hidden>
+    <div class="congrats-card" role="dialog" aria-modal="true" aria-labelledby="inatCelebrateTitle">
+      <div class="congrats-badge">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12.5l4.5 4.5L19 7" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      </div>
+      <h2 id="inatCelebrateTitle">Posted to iNaturalist!</h2>
+      <p class="congrats-sub">Your observation is live and linked to this photo.</p>
+      <a id="inatCelebrateLink" class="btn btn-inat full" target="_blank" rel="noopener" style="text-decoration:none; margin-bottom:8px">View observation ↗</a>
+      <button id="inatCelebrateClose" class="btn btn-ghost full">Keep tagging</button>
     </div>
   </div>
 
@@ -80,7 +92,7 @@
           <p class="hint" style="margin:0">Checks your iNaturalist account near every photo's date/time (any status — untouched, labelled, skipped, deleted…), compares the images, and lets you confirm matches.</p>
 
           <label class="field-label">API token <span id="inatStatus" class="tag"></span></label>
-          <p class="hint">Used only from your browser to call iNaturalist; expires after ~24&nbsp;hours.
+          <p class="hint">Click the link (sign in if asked), copy <em>everything</em> the page shows, and paste it below — tagit extracts the token and checks it automatically. Used only from your browser; expires after ~24&nbsp;hours.
             <a href="https://www.inaturalist.org/users/api_token" target="_blank" rel="noopener">Get a token ↗</a></p>
           <div class="inat-token-row">
             <input type="password" id="inatToken" class="input" placeholder="Paste iNaturalist API token…" autocomplete="off">
@@ -166,6 +178,7 @@
         <div class="field-label">Show</div>
         <div id="statusFilter" class="segmented">
           <label class="seg"><input type="checkbox" value="untouched"><span>Untouched</span></label>
+          <label class="seg seg-preexisting" hidden><input type="checkbox" value="preexisting"><span>Already tagged</span></label>
           <label class="seg"><input type="checkbox" value="labelled"><span>Labelled</span></label>
           <label class="seg"><input type="checkbox" value="skipped"><span>Skipped</span></label>
           <label class="seg"><input type="checkbox" value="undetermined"><span>Undetermined</span></label>
@@ -183,6 +196,75 @@
       </div>
       <div class="map-modal-body">
         <div id="mapFrameLarge" role="img" aria-label="Photo location on the map (large)"></div>
+      </div>
+    </div>
+  </div>
+
+  <div id="estimateLocationModal" class="modal-overlay" hidden>
+    <div class="modal-card modal-card-wide" role="dialog" aria-modal="true" aria-labelledby="estimateLocationTitle">
+      <div class="modal-header">
+        <h3 id="estimateLocationTitle">Estimated location</h3>
+        <button type="button" class="modal-close" data-close="estimateLocationModal" aria-label="Close">×</button>
+      </div>
+      <div class="fold-sec-body">
+        <div id="estimateLocationMap" class="estimate-location-map" role="img" aria-label="Estimated location, with the nearby photos it was based on"></div>
+        <p id="estimateLocationExplain" class="hint"></p>
+        <div class="grid2">
+          <button type="button" id="estimateLocationConfirmBtn" class="btn btn-primary">Use this location</button>
+          <button type="button" id="estimateLocationCancelBtn" class="btn btn-ghost">Cancel</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div id="photosConnectModal" class="modal-overlay" hidden>
+    <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="photosConnectTitle">
+      <div class="modal-header">
+        <h3 id="photosConnectTitle">Connect to Photos</h3>
+        <button type="button" class="modal-close" data-close="photosConnectModal" aria-label="Close">×</button>
+      </div>
+      <div class="fold-sec-body">
+        <div id="photosConnectSetup">
+          <div class="privacy-banner">
+            <span class="dot" aria-hidden="true"></span>
+            <div>
+              <strong>Runs entirely on this Mac.</strong>
+              <p>tagit talks to a small helper app on your own computer at <code>127.0.0.1</code> — never anywhere else. You pick exactly one album, and only those photos are ever shared — nothing else in your library. Quitting the helper (or an hour of inactivity) ends access immediately.</p>
+            </div>
+          </div>
+          <a id="launchHelperLink" href="tagitphotos://start" class="btn btn-primary full" style="text-decoration:none">Connect to Photos</a>
+          <p class="hint" style="margin:6px 0 12px">Everything is automatic: approve the browser's “open app” prompt (and, the first time, macOS's two Photos permission prompts), pick an album right here, and start tagging. <strong>First time only:</strong> if nothing happens, the helper needs to be built and opened once by hand — see <a href="https://github.com/marco-barandun/tagit/blob/main/photos-helper/README.md" target="_blank" rel="noopener">setup instructions</a>; after that this button works directly.</p>
+          <details>
+            <summary class="hint" style="cursor:pointer">Connect manually instead (if automatic pairing fails)</summary>
+            <label class="field-label" for="photosConnectToken">Pairing code — shown in the helper's window</label>
+            <input id="photosConnectToken" class="input mono" autocomplete="off" placeholder="Paste the code from the helper…">
+            <label class="field-label" for="photosConnectUrl" style="margin-top:10px">Helper address <span class="hint">(advanced — leave as-is normally)</span></label>
+            <input id="photosConnectUrl" class="input mono" autocomplete="off" value="http://127.0.0.1:8765">
+            <button id="photosConnectBtn" class="btn full" style="margin-top:12px">Connect with code</button>
+          </details>
+        </div>
+        <div id="photosConnectedBox" hidden>
+          <p class="hint" style="margin:0 0 10px">Connected to Photos — working with the album <strong id="photosConnectedAlbum"></strong>.</p>
+          <div class="grid2">
+            <button id="photosChangeAlbumBtn" class="btn">Change album</button>
+            <button id="photosDisconnectBtn" class="btn btn-danger">Disconnect &amp; quit helper</button>
+          </div>
+        </div>
+        <div id="photosConnectHint" class="hint" style="margin-top:10px"></div>
+      </div>
+    </div>
+  </div>
+
+  <div id="photosAlbumModal" class="modal-overlay" hidden>
+    <div class="modal-card modal-card-wide" role="dialog" aria-modal="true" aria-labelledby="photosAlbumTitle">
+      <div class="modal-header">
+        <h3 id="photosAlbumTitle">Choose an album</h3>
+        <button type="button" class="modal-close" data-close="photosAlbumModal" aria-label="Close">×</button>
+      </div>
+      <div class="fold-sec-body">
+        <p class="hint" style="margin:0 0 10px">Only photos in the album you pick are shared with tagit — nothing else in your library is ever touched. You can switch albums any time via <em>Connect to Photos</em>.</p>
+        <input id="photosAlbumSearch" class="input" autocomplete="off" placeholder="Search albums and folders…" style="margin-bottom:10px">
+        <div id="photosAlbumGrid" class="album-groups"></div>
       </div>
     </div>
   </div>
@@ -213,9 +295,22 @@
           </div>
         </div>
 
+        <button id="refreshKeywordsBtn" class="btn btn-ghost full">Refresh keywords for already-captioned photos</button>
+        <p class="hint" style="margin:6px 0 0">Re-derives genus/species/family/attribute keywords from the taxonomies above for every photo in this folder that already has a caption — handy after editing a taxonomy or adding new attribute columns. Keywords you added by hand are kept; you'll see exactly what would change before anything is written.</p>
+
         <h4>Observation log <span id="obsStatus" class="tag"></span></h4>
         <p class="hint">CSV/TSV with a taxon column and a date column (<code>date_start</code>/<code>datetime</code>). Powers the time-based suggestions.</p>
         <input type="file" id="obsFile" accept=".csv,.tsv,.txt">
+
+        <h4>Folder organization</h4>
+        <label class="check"><input type="checkbox" id="perSpeciesFolders"><span>Sort labelled photos into one folder per species (within <code>_labelled</code>)</span></label>
+        <p class="hint" style="margin:6px 0 0">Off by default — everything saved as labelled goes straight into <code>_labelled</code>. Turn this on to instead get <code>_labelled/Genus species/</code> subfolders, one per taxon. Applies to photos saved from now on; existing files aren't reorganized.</p>
+
+        <h4>Settings</h4>
+        <div class="settings-grid">
+          <label>Suggestion window (± min)<input type="number" id="windowMin" class="input small" min="0" step="1"></label>
+          <label>Camera clock offset (h)<input type="number" id="clockOffset" class="input small" step="0.5"></label>
+        </div>
 
         <h4>Watermark</h4>
         <label class="check"><input type="checkbox" id="wmEnable"><span>Burn a watermark into saved photos</span></label>
@@ -239,16 +334,6 @@
           <label>Size (% of shorter side)
             <input type="number" id="wmSize" class="input small" min="1" max="10" step="0.5">
           </label>
-        </div>
-
-        <h4>Folder organization</h4>
-        <label class="check"><input type="checkbox" id="perSpeciesFolders"><span>Sort labelled photos into one folder per species (within <code>_labelled</code>)</span></label>
-        <p class="hint" style="margin:6px 0 0">Off by default — everything saved as labelled goes straight into <code>_labelled</code>. Turn this on to instead get <code>_labelled/Genus species/</code> subfolders, one per taxon. Applies to photos saved from now on; existing files aren't reorganized.</p>
-
-        <h4>Settings</h4>
-        <div class="settings-grid">
-          <label>Suggestion window (± min)<input type="number" id="windowMin" class="input small" min="0" step="1"></label>
-          <label>Camera clock offset (h)<input type="number" id="clockOffset" class="input small" step="0.5"></label>
         </div>
       </div>
     </div>
@@ -274,6 +359,7 @@
           <li>Save → <code>_labelled</code>; Skip → <code>_skipped</code>; Can’t determine → <code>_undetermined</code> (“Indet.”); Delete → <code>_deleted</code>.</li>
           <li>Full folder editing works in Chrome/Edge/Brave/Arc. Safari/Firefox: drag in and download copies.</li>
           <li>This build handles <strong>JPEG</strong> only — RAW/HEIC need the desktop version.</li>
+          <li><strong>Connect to Photos</strong> tags photos straight from your Apple Photos library via a small local helper app — captions/keywords are written with Photos' own scripting interface, so nothing is exported or re-imported. Rotate, watermark and estimated-location aren't available for these photos yet.</li>
           <li><strong>iNaturalist</strong>: paste a token in the iNaturalist tab, then click <em>Identify with iNaturalist</em> to get AI suggestions (with confidence %) for the current photo (uses its GPS &amp; date).</li>
           <li><strong>Map</strong>: photos with GPS get a <em>Show map</em> control in the photo info; it appears as a small preview in the photo's bottom-right corner — click it to enlarge.</li>
           <li>Keys: ← → navigate · 1–9 pick a suggestion · Delete discard (only with nothing selected). Just start typing a letter anywhere to jump into the search box — Rotate/Undo/Can’t-determine/Same-as-previous are one click away as buttons instead of shortcut letters, so a letter key always means “start a search.”</li>
@@ -295,6 +381,10 @@
     </div>
     <div class="appbar-actions">
       <button id="reopenBtn" class="btn btn-ghost" style="display:none"></button>
+      <button id="connectPhotosBtn" class="btn btn-ghost" title="Tag photos straight from your Apple Photos library">
+        <svg viewBox="0 0 24 24" class="ic" aria-hidden="true"><rect x="3" y="5" width="18" height="14" rx="2" fill="none" stroke="currentColor" stroke-width="1.7"/><circle cx="8.5" cy="10" r="1.6" fill="currentColor"/><path d="M4 17l5-5 4 4 3-3 4 4" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        Connect to Photos
+      </button>
       <button id="setupBtn" class="btn btn-ghost" title="Set up taxonomies, iNaturalist, watermark…">
         <svg viewBox="0 0 24 24" class="ic" aria-hidden="true"><circle cx="12" cy="12" r="3" fill="none" stroke="currentColor" stroke-width="1.7"/><path d="M19.4 13a7.4 7.4 0 0 0 0-2l2-1.5-2-3.4-2.4.8a7.6 7.6 0 0 0-1.7-1L14.8 3H9.2l-.5 2.9a7.6 7.6 0 0 0-1.7 1l-2.4-.8-2 3.4L4.6 11a7.4 7.4 0 0 0 0 2l-2 1.5 2 3.4 2.4-.8a7.6 7.6 0 0 0 1.7 1l.5 2.9h5.6l.5-2.9a7.6 7.6 0 0 0 1.7-1l2.4.8 2-3.4z" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/></svg>
         Setup
@@ -408,7 +498,7 @@
   </main>
 
   <script src="metadata.js?v=12"></script>
-  <script src="app.js?v=12"></script>
+  <script src="app.js?v=18"></script>
   <script>
     (() => {
       const root = document.documentElement;

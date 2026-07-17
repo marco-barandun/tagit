@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleIdentifier</key>
+	<string>com.tagit.photos-helper</string>
+	<key>CFBundleName</key>
+	<string>tagit Photos Helper</string>
+	<key>CFBundleDisplayName</key>
+	<string>tagit Photos Helper</string>
+	<key>CFBundleExecutable</key>
+	<string>PhotosHelper</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>CFBundleShortVersionString</key>
+	<string>1.0</string>
+	<key>CFBundleVersion</key>
+	<string>1</string>
+	<key>LSMinimumSystemVersion</key>
+	<string>13.0</string>
+	<key>LSUIElement</key>
+	<true/>
+	<key>NSPhotoLibraryUsageDescription</key>
+	<string>tagit needs access to the photos you select so you can add captions and keywords to them. Only the photos you explicitly pick are shared; nothing else in your library is touched.</string>
+	<key>NSAppleEventsUsageDescription</key>
+	<string>tagit uses Photos' own scripting interface to write the caption and keywords you enter, onto the exact photo you're tagging — this is the only way to set those fields.</string>
+	<key>CFBundleURLTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleURLName</key>
+			<string>com.tagit.photos-helper.launch</string>
+			<key>CFBundleURLSchemes</key>
+			<array>
+				<string>tagitphotos</string>
+			</array>
+		</dict>
+	</array>
+</dict>
+</plist>
