@@ -764,6 +764,12 @@ select.input {
 .meta-caption-row { cursor: pointer; border-radius: 4px; }
 .meta-caption-row:hover { text-decoration: underline; text-decoration-style: dotted; }
 
+/* Star rating row (1-5 keyboard shortcuts, also clickable) */
+.meta-rating-row { display: flex; gap: 2px; margin: 2px 0; }
+.meta-star { cursor: pointer; font-size: 15px; line-height: 1; color: rgba(255,255,255,0.35); }
+.meta-star.filled { color: #e0b83b; }
+.meta-star:hover { color: #e0b83b; opacity: 0.85; }
+
 /* ---------- Apple Photos album picker ---------- */
 .album-groups { max-height: 55vh; overflow-y: auto; padding: 4px 2px; }
 .album-group-title {

@@ -1,0 +1,12 @@
+# macOS
+.DS_Store
+
+# Swift Package Manager build artifacts (photos-helper/)
+photos-helper/.build/
+photos-helper/.swiftpm/
+
+# Built app bundle + launchers — regenerate with photos-helper/build-app.sh
+photos-helper/dist/
+
+# Editor cruft
+*.swp

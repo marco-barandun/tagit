@@ -60,8 +60,7 @@
     inatToken: "",         // iNaturalist API token (browser-only)
     inatResults: [],       // last CV suggestions
     inatResultsFor: null,  // photo the CV suggestions belong to
-    mapVisible: false,     // map toggle (persisted)
-    infoVisible: true,     // photo-info panel (map/date/time/caption/keywords) toggle
+    infoVisible: true,     // photo-info panel (map/date/time/caption/keywords) toggle — the map preview follows this too
     watermark: { enabled: false, text: "", position: "br", font: "sans", sizePct: 2.8 },  // optional burned-in watermark
     perSpeciesFolders: false,  // organize _labelled into one subfolder per species (off by default)
     lastApproxLocation: null,  // {lat, lon, radiusM} last manually-picked approximate location (for reuse)
@@ -673,12 +672,15 @@
       img.src = p.url;
     } catch (e) { console.warn("preview failed", e); img.src = ""; }
     meta.innerHTML = "";
-    meta.append(el("div", { className: "meta-filename", textContent: p.name }));
+    // Apple Photos filenames (IMG_0001.jpg …) are meaningless/generic —
+    // showing them is just noise in that mode.
+    if (S.mode !== "applephotos") meta.append(el("div", { className: "meta-filename", textContent: p.name }));
     if (p.datetime) {
       meta.append(el("div", { textContent: "Date: " + fmtDay(p.datetime) }));
       meta.append(el("div", { textContent: "Time: " + fmtTime(p.datetime) }));
     } else meta.append(el("div", { textContent: "Date taken: unknown" }));
     meta.append(captionRow(p));
+    meta.append(ratingRow(p));
     if (p.keywords && p.keywords.length) {
       meta.append(el("div", { className: "meta-overlay-kw", textContent: p.keywords.join(" · ") }));
     }
@@ -808,6 +810,95 @@
       showInatCelebration(url);
     } catch (e) {
       console.error(e); toast("iNaturalist observation failed: " + (e.message || e) + ".", "warn", 9000);
+    } finally { setBusy(null); }
+  }
+
+  // Group version of inatCreateObservation(): the filmstrip's multi-select
+  // (shift-click a range, Cmd/Ctrl-click to toggle) feeds this — one
+  // observation, every selected photo attached to it as an
+  // observation_photo, same as picking "add more photos" by hand on
+  // iNaturalist's own site. Status is left untouched, matching the
+  // single-photo flow (that one doesn't mark "labelled" either — only the
+  // caption/keywords/link change).
+  async function inatCreateObservationFromSelection() {
+    const targets = [...S.multiSel].sort((a, b) => a - b).map((i) => S.photos[i]).filter(Boolean);
+    if (targets.length < 2) return;
+    const token = requireInatToken();
+    if (!token) return;
+    const taxa = S.selected.length ? S.selected : taxaFromCaption($("captionBox").value.trim());
+    const name = (taxa[0] || "").trim();
+    if (!name) { toast("Pick a taxon first — it's used for all selected photos.", "warn", 5000); return; }
+    const already = targets.filter((p) => p.inatUrl);
+    if (already.length && !confirm(`${already.length} of these ${targets.length} photos are already linked to an observation. Create a new one (with all ${targets.length}) anyway?`)) return;
+
+    // One set of geo/date for the whole group — the first selected photo
+    // that actually has real GPS (or, failing that, an approximate location).
+    const geoSource = targets.find((p) => p.lat != null && p.lon != null) || targets.find((p) => p.approxLat != null) || targets[0];
+    const hasRealGps = geoSource.lat != null && geoSource.lon != null;
+    const geoLabel = { open: "public", obscured: "obscured", private: "private" }[($("inatGeo") && $("inatGeo").value) || "open"];
+    const geoNote = hasRealGps ? `Coordinates will be ${geoLabel} (from “${geoSource.name}”).`
+      : (geoSource.approxLat != null ? `No GPS — using the approximate location from “${geoSource.name}” (±${fmtRadius(geoSource.approxUncertaintyM)}, ${geoLabel}).`
+      : "No location will be attached (none of the selected photos have GPS or an approximate location).");
+    if (!confirm(`Post ONE iNaturalist observation for “${name}” with all ${targets.length} selected photos?\n${geoNote}\nThis posts to your public iNaturalist account.`)) return;
+
+    setBusy(`Creating iNaturalist observation for ${targets.length} photos…`);
+    try {
+      let taxonId = null;
+      try {
+        const tr = await fetch("https://api.inaturalist.org/v1/taxa?per_page=1&q=" + encodeURIComponent(name),
+          { headers: { Authorization: "Bearer " + token } });
+        if (tr.ok) { const tj = await tr.json(); taxonId = tj.results && tj.results[0] && tj.results[0].id; }
+      } catch { /* still create as a free-text guess */ }
+
+      const geo = ($("inatGeo") && $("inatGeo").value) || "open";
+      const obs = { species_guess: name, geoprivacy: geo };
+      const dateSource = targets.find((p) => p.datetime);
+      if (dateSource) obs.observed_on_string = fmtDate(dateSource.datetime);
+      if (taxonId) obs.taxon_id = taxonId;
+      if (hasRealGps) {
+        obs.latitude = geoSource.lat; obs.longitude = geoSource.lon;
+      } else if (geoSource.approxLat != null) {
+        obs.latitude = geoSource.approxLat; obs.longitude = geoSource.approxLon;
+        obs.positional_accuracy = geoSource.approxUncertaintyM;
+      }
+
+      const cr = await fetch("https://api.inaturalist.org/v1/observations", {
+        method: "POST", headers: { Authorization: "Bearer " + token, "Content-Type": "application/json" },
+        body: JSON.stringify({ observation: obs }),
+      });
+      if (cr.status === 401) throw new Error("token invalid or expired");
+      if (!cr.ok) throw new Error("could not create the observation (HTTP " + cr.status + ")");
+      const cj = await cr.json();
+      const obsId = cj.id || (cj.results && cj.results[0] && cj.results[0].id);
+      if (!obsId) throw new Error("observation created but no id returned");
+      const url = "https://www.inaturalist.org/observations/" + obsId;
+
+      const caption = composeForTaxa(taxa) || name;
+      const keywords = keywordsForSave(taxa);
+      let uploaded = 0;
+      for (const p of targets) {
+        try {
+          const img = await resizeJpeg(await getFile(p), 2048);
+          const fd = new FormData();
+          fd.append("observation_photo[observation_id]", String(obsId));
+          fd.append("file", img, "photo.jpg");
+          await fetch("https://api.inaturalist.org/v1/observation_photos",
+            { method: "POST", headers: { Authorization: "Bearer " + token }, body: fd });
+          uploaded++;
+        } catch (e) { console.warn("photo upload to iNaturalist failed for", p.name, e); }
+        try {
+          await writeCaptionKeywords(p, caption, keywords, url);
+          p.inatUrl = url; p.caption = caption; p.keywords = keywords;
+        } catch (e) { console.warn("local metadata write failed for", p.name, e); }
+      }
+      clearMultiSel();
+      render();
+      showInatCelebration(url);
+      if (uploaded < targets.length) {
+        toast(`Uploaded ${uploaded} of ${targets.length} photos to the observation — the rest failed; check iNaturalist.`, "warn", 9000);
+      }
+    } catch (e) {
+      console.error(e); toast("Group iNaturalist observation failed: " + (e.message || e) + ".", "warn", 9000);
     } finally { setBusy(null); }
   }
 
@@ -1137,36 +1228,23 @@
     addTileLayer(largeMap);
     return largeMap;
   }
+  // The small map preview has no toggle of its own any more — it just
+  // follows the (i) photo-info visibility toggle, same as the rest of the
+  // overlay (filename, date, caption, …).
   function renderPhotoControls() {
     const p = current();
     const hasGps = p && p.lat != null && p.lon != null;
     const corner = $("mapCorner");
-    if (!hasGps) { corner.hidden = true; return; }
-    if (S.mapVisible) {
-      corner.hidden = false;
-      const map = ensureCornerMap();
-      map.setView([p.lat, p.lon], 15);
-      if (cornerMarker) cornerMarker.setLatLng([p.lat, p.lon]);
-      else cornerMarker = L.circleMarker([p.lat, p.lon], MARKER_STYLE).addTo(map);
-      // The container was just un-hidden (or created at zero size) — Leaflet
-      // needs a nudge once it actually has real dimensions to lay tiles out
-      // correctly.
-      setTimeout(() => map.invalidateSize(), 0);
-    } else {
-      corner.hidden = true;
-    }
-  }
-  // The "Show/Hide map" control lives inline with the other photo info, added
-  // as a row in #meta by render() (only when the photo has GPS).
-  function mapToggleRow() {
-    const btn = el("button", { id: "mapToggleBtn", className: "meta-map-btn" });
-    btn.textContent = S.mapVisible ? "Hide map" : "Show map ↴";
-    btn.onclick = () => {
-      S.mapVisible = !S.mapVisible; LS.set("mapVisible", S.mapVisible);
-      btn.textContent = S.mapVisible ? "Hide map" : "Show map ↴";
-      renderPhotoControls();
-    };
-    return btn;
+    if (!hasGps || !S.infoVisible) { corner.hidden = true; return; }
+    corner.hidden = false;
+    const map = ensureCornerMap();
+    map.setView([p.lat, p.lon], 15);
+    if (cornerMarker) cornerMarker.setLatLng([p.lat, p.lon]);
+    else cornerMarker = L.circleMarker([p.lat, p.lon], MARKER_STYLE).addTo(map);
+    // The container was just un-hidden (or created at zero size) — Leaflet
+    // needs a nudge once it actually has real dimensions to lay tiles out
+    // correctly.
+    setTimeout(() => map.invalidateSize(), 0);
   }
   function openMapModal() {
     const p = current();
@@ -1550,7 +1628,21 @@
   // background. Reading is deferred so a slow or malformed file can never stop
   // the photos from appearing — the single biggest source of "nothing loads".
   function beginSession(photos) {
-    photos.sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: "base" }));
+    if (S.mode === "applephotos") {
+      // The helper already fetches assets sorted by creationDate — real dates
+      // are available immediately here (unlike fs mode, which hasn't read
+      // EXIF yet at this point), so sort by that instead of filename. Photos
+      // without a date (rare) fall back to filename, keeping a stable order
+      // instead of clumping at one end.
+      photos.sort((a, b) => {
+        if (a.datetime && b.datetime) return a.datetime - b.datetime;
+        if (a.datetime) return -1;
+        if (b.datetime) return 1;
+        return a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: "base" });
+      });
+    } else {
+      photos.sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: "base" }));
+    }
     S.photos = photos;
     S.idx = photos.findIndex((p) => p.status === "untouched");
     if (S.idx < 0) S.idx = 0;
@@ -1559,11 +1651,16 @@
     S.multiSel.clear(); S.selAnchor = null; S._filmSig = null;
     clearSelection();
     render();
-    // Apple Photos mode already gets datetime/GPS/caption/keywords from the
-    // helper (authoritative — AppleScript/PhotosKit, not the file bytes), and
-    // its images may carry no EXIF at all (demo mode) — re-reading EXIF here
-    // would just blank those fields out or fight with the real values.
-    if (photos.length && S.mode !== "applephotos") loadMetaInBackground(photos);
+    // Apple Photos mode already gets datetime/GPS from the helper — no EXIF
+    // re-read needed for those — but caption/keywords are deliberately left
+    // blank by the initial /photos listing (AppleScript lookups are the slow
+    // part; loading them for the whole album before showing anything was the
+    // main reason opening a big album "took a lot to load"), so they stream
+    // in the background here too, just via a different loader.
+    if (photos.length) {
+      if (S.mode === "applephotos") loadApplePhotosMetaInBackground(photos);
+      else loadMetaInBackground(photos);
+    }
   }
 
   function withTimeout(promise, ms) {
@@ -1599,6 +1696,54 @@
     }
     if (token === S.metaToken) { setBusy(null); render(); }
   }
+
+  // Apple Photos counterpart to loadMetaInBackground(): the initial /photos
+  // listing is deliberately fast (PhotosKit only, no AppleScript at all —
+  // see scanAndLoadApplePhotos), so caption/keywords for every photo stream
+  // in afterward, in batches, via the helper's /photos/meta. Shares
+  // S.metaToken with the fs-mode loader so switching sources/reconnecting
+  // correctly cancels whichever background load was previously running.
+  async function loadApplePhotosMetaInBackground(photos) {
+    const token = ++S.metaToken;
+    const BATCH = 30;
+    const ids = photos.map((p) => p.assetId);
+    const batches = [];
+    for (let i = 0; i < ids.length; i += BATCH) batches.push(ids.slice(i, i + BATCH));
+    // Whichever batch contains the currently-displayed photo goes first, so
+    // its real status/caption appears almost immediately even on a big album.
+    const curId = S.photos[S.idx] && S.photos[S.idx].assetId;
+    const curBatchIdx = batches.findIndex((b) => b.includes(curId));
+    if (curBatchIdx > 0) { const [b] = batches.splice(curBatchIdx, 1); batches.unshift(b); }
+
+    let done = 0;
+    for (const batch of batches) {
+      if (token !== S.metaToken) return;                 // a newer load superseded us
+      try {
+        const res = await apFetch("/photos/meta", {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ ids: batch }),
+        });
+        const { meta } = await res.json();
+        for (const p of photos) {
+          const got = meta[p.assetId];
+          if (!got) continue;
+          const rawKw = got.keywords || [];
+          const caption = got.caption || "";
+          const keywords = stripReservedKeywords(rawKw);
+          let status = statusFromKeywords(rawKw);
+          if (status === "untouched" && (caption.trim() || keywords.length)) status = "preexisting";
+          p.caption = caption; p.keywords = keywords; p.status = status;
+          p.inatUrl = inatUrlFromKeywords(rawKw);
+        }
+      } catch (e) { console.warn("meta batch failed", e); }
+      if (token !== S.metaToken) return;
+      render();
+      done += batch.length;
+      if (done < ids.length) setBusy(`Reading captions/keywords… ${Math.min(done, ids.length)}/${ids.length}`);
+    }
+    if (token === S.metaToken) { setBusy(null); render(); }
+  }
+
   async function collectFrom(dirHandle, status, out, dirKey = null, stats = null) {
     for await (const [name, h] of dirHandle.entries()) {
       if (h.kind === "directory") {
@@ -1683,6 +1828,62 @@
     const mark = APPLE_PHOTOS_STATUS_KW[status];
     const id = inatIdFromUrl(inatUrl);
     return [...clean, ...(mark ? [mark] : []), ...(id ? [INAT_KW_PREFIX + id] : [])];
+  }
+
+  // ---- star ratings (1-5, works in every mode) ------------------------------
+  // Unlike the tagit:* status markers, a rating is a real, visible keyword —
+  // it's meant to be seen and searched (including in Apple Photos itself, via
+  // its own keyword search), not hidden bookkeeping. One run of ★ characters
+  // encodes the rating; only one can exist on a photo at a time.
+  const RATING_RE = /^★+$/;
+  function ratingFromKeywords(keywords) {
+    const kw = (keywords || []).find((k) => RATING_RE.test(k));
+    return kw ? kw.length : 0;
+  }
+  function withRating(keywords, n) {
+    const clean = (keywords || []).filter((k) => !RATING_RE.test(k));
+    return n > 0 ? [...clean, "★".repeat(n)] : clean;
+  }
+  // Rating a photo 5 stars also marks it a Photos favorite (native heart
+  // icon) — a one-way link: lowering the rating later never un-favorites,
+  // since that's a separate, more deliberate action than a rating tweak.
+  async function ratePhoto(p, n) {
+    if (!p) return;
+    const nextKeywords = withRating(p.keywords, n);
+    try {
+      await writeCaptionKeywords(p, p.caption, nextKeywords, p.inatUrl);
+      p.keywords = nextKeywords;
+      let favNote = "";
+      if (S.mode === "applephotos" && n === 5) {
+        try {
+          await apFetch(`/photos/${encodeURIComponent(p.assetId)}/favorite`, {
+            method: "POST", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ favorite: true }),
+          });
+          favNote = " and marked as a favorite in Photos";
+        } catch (e) { console.warn("favorite failed", e); }
+      }
+      render();
+      toast(n > 0 ? `Rated ${"★".repeat(n)} (${n}/5)${favNote}.` : "Rating cleared.", "info", 2200);
+    } catch (e) {
+      console.error(e); toast("Couldn't save the rating: " + (e.message || e), "warn", 6000);
+    }
+  }
+  // Clickable star row for the photo-info overlay — mirrors the 1-5 keyboard
+  // shortcuts; clicking the currently-set star clears the rating.
+  function ratingRow(p) {
+    const rating = ratingFromKeywords(p.keywords);
+    const row = el("div", { className: "meta-rating-row" });
+    for (let n = 1; n <= 5; n++) {
+      const star = el("span", {
+        className: "meta-star" + (n <= rating ? " filled" : ""),
+        textContent: n <= rating ? "★" : "☆",
+        title: `Rate ${n} star${n === 1 ? "" : "s"}` + (n === 5 ? " (also favorites it in Photos)" : ""),
+      });
+      star.onclick = () => ratePhoto(p, n === rating ? 0 : n);
+      row.append(star);
+    }
+    return row;
   }
 
   async function apFetch(path, opts = {}) {
@@ -2137,8 +2338,11 @@
     if (filmObserver) filmObserver.disconnect();
     strip.innerHTML = "";
     const vis = visibleIdx();
-    if (!vis.length) { strip.hidden = true; updateBulkBar(); return; }
-    strip.hidden = false;
+    // The strip follows the (i) photo-info toggle, same as the map preview —
+    // cells still get built while hidden so they're ready the instant it's
+    // switched back on.
+    strip.hidden = !S.infoVisible || !vis.length;
+    if (!vis.length) { updateBulkBar(); return; }
     filmObserver = new IntersectionObserver((entries) => {
       for (const en of entries) {
         if (!en.isIntersecting) continue;
@@ -2165,7 +2369,10 @@
   // keep the current photo scrolled into view. No DOM rebuilding.
   function syncFilmstrip() {
     const strip = $("filmstrip");
-    if (!strip || strip.hidden) { updateBulkBar(); return; }
+    if (!strip) { updateBulkBar(); return; }
+    const hasCells = strip.children.length > 0;
+    strip.hidden = !S.infoVisible || !hasCells;
+    if (!hasCells) { updateBulkBar(); return; }
     for (const cell of strip.children) {
       const i = +cell.dataset.idx;
       const p = S.photos[i];
@@ -2174,8 +2381,10 @@
       const dot = cell.querySelector(".film-dot");
       if (p && dot) dot.style.background = STATUS_LABEL[p.status].color;
     }
-    const cur = strip.querySelector(".film-cell.current");
-    if (cur) cur.scrollIntoView({ block: "nearest", inline: "nearest" });
+    if (!strip.hidden) {
+      const cur = strip.querySelector(".film-cell.current");
+      if (cur) cur.scrollIntoView({ block: "nearest", inline: "nearest" });
+    }
     updateBulkBar();
   }
   function onFilmCellClick(i, e) {
@@ -2672,21 +2881,31 @@
     }
     // preview
     try {
-      if (!p.url) p.url = URL.createObjectURL(await getFile(p));
+      if (!p.url) {
+        // Photos-mode images come over HTTP and may need an iCloud fetch —
+        // show the already-fast, local-only thumbnail immediately so the
+        // stage never looks frozen while the full-size image comes in
+        // behind it (this was the main reason loading felt slow).
+        if (S.mode === "applephotos") {
+          try { $("photo").src = await thumbUrlFor(p); } catch { /* no local thumbnail yet — stage stays as-is */ }
+        }
+        p.url = URL.createObjectURL(await getFile(p));
+      }
       $("photo").src = p.url;
     } catch (e) {
       console.warn("preview failed", e);
       $("photo").src = "";
       toast("Couldn't load this photo's image: " + (e.message || e), "warn", 8000);
     }
-    // Photos-mode images come over HTTP one at a time — quietly warm up the
-    // next visible photo so advancing feels instant. And since each fetched
-    // image is cached as a blob, evict the ones far from the current photo,
-    // or a few hundred photos of browsing would quietly hold hundreds of MB.
+    // Quietly warm up the next couple of visible photos so advancing feels
+    // instant. And since each fetched image is cached as a blob, evict the
+    // ones far from the current photo, or browsing a few hundred photos
+    // would quietly hold hundreds of MB.
     if (S.mode === "applephotos") {
-      const after = visibleIdx().filter((i) => i > S.idx);
-      const next = after.length ? S.photos[after[0]] : null;
-      if (next && !next._apBlob) getFile(next).catch(() => {});
+      for (const i of visibleIdx().filter((i) => i > S.idx).slice(0, 2)) {
+        const q = S.photos[i];
+        if (q && !q._apBlob) getFile(q).catch(() => {});
+      }
       S.photos.forEach((q, i) => {
         if (q._apBlob && Math.abs(i - S.idx) > 10) {
           if (q.url) { URL.revokeObjectURL(q.url); q.url = null; }
@@ -2699,7 +2918,9 @@
     // filename first, then date/time/locality/caption/keywords/link. Status
     // sits separately, bottom-right corner (under the map preview if shown).
     $("meta").innerHTML = "";
-    $("meta").append(el("div", { className: "meta-filename", textContent: p.name }));
+    // Apple Photos filenames (IMG_0001.jpg …) are meaningless/generic —
+    // showing them is just noise in that mode.
+    if (S.mode !== "applephotos") $("meta").append(el("div", { className: "meta-filename", textContent: p.name }));
     const corner = $("statusCorner");
     corner.hidden = false;
     corner.textContent = STATUS_LABEL[p.status].text;
@@ -2712,6 +2933,7 @@
     if (loc) bits.push("Locality (log): " + loc);
     for (const b of bits) $("meta").append(el("div", { textContent: b }));
     $("meta").append(captionRow(p));
+    $("meta").append(ratingRow(p));
     if (p.keywords && p.keywords.length) {
       $("meta").append(el("div", { className: "meta-overlay-kw", textContent: p.keywords.join(" · ") }));
     }
@@ -2720,8 +2942,7 @@
       d.append(el("a", { href: p.inatUrl, target: "_blank", rel: "noopener", textContent: "iNaturalist observation ↗" }));
       $("meta").append(d);
     }
-    if (p.lat != null && p.lon != null) $("meta").append(mapToggleRow());
-    else $("meta").append(estimateLocationRow());
+    if (p.lat == null || p.lon == null) $("meta").append(estimateLocationRow());
     $("meta").hidden = !S.infoVisible;
 
     renderSuggestions(); renderRecent(); renderSelection();
@@ -2758,12 +2979,16 @@
     $("barDone").style.width = Math.round((100 * done) / total) + "%";
     if ($("barPre")) $("barPre").style.width = Math.round((100 * c.preexisting) / total) + "%";
     $("barUndet").style.width = Math.round((100 * c.undetermined) / total) + "%";
-    // "already tagged" only exists in Apple Photos mode — only mention it
-    // when there actually are some, so the folder workflow's text is unchanged.
+    // "Untouched" is always shown — it's the one number that answers "how
+    // much work is left". Every other category only appears once it's
+    // actually non-zero, so a fresh folder/album doesn't read as a wall of
+    // "0 skipped, 0 undetermined, 0 deleted" noise.
     const parts = [`${c.untouched} untouched`];
     if (c.preexisting) parts.push(`${c.preexisting} already tagged`);
-    parts.push(`${c.labelled} labelled`, `${c.skipped} skipped`,
-               `${c.undetermined} undetermined`, `${c.deleted} deleted`);
+    if (c.labelled) parts.push(`${c.labelled} labelled`);
+    if (c.skipped) parts.push(`${c.skipped} skipped`);
+    if (c.undetermined) parts.push(`${c.undetermined} undetermined`);
+    if (c.deleted) parts.push(`${c.deleted} deleted`);
     $("progressText").textContent =
       parts.join(", ") + ` (showing #${S.photos.length ? S.idx + 1 : 0} of ${S.photos.length})`;
   }
@@ -3100,6 +3325,7 @@
 
     // filmstrip bulk actions
     if ($("bulkApplyBtn")) $("bulkApplyBtn").onclick = () => bulkApply("labelled");
+    if ($("bulkInatBtn")) $("bulkInatBtn").onclick = () => inatCreateObservationFromSelection();
     if ($("bulkSkipBtn")) $("bulkSkipBtn").onclick = () => bulkApply("skipped");
     if ($("bulkUndetBtn")) $("bulkUndetBtn").onclick = () => bulkApply("undetermined");
     if ($("bulkDeleteBtn")) $("bulkDeleteBtn").onclick = () => bulkApply("deleted");
@@ -3260,7 +3486,13 @@
       }
       if (k === "ArrowRight") { e.preventDefault(); goNext(); }
       else if (k === "ArrowLeft") { e.preventDefault(); goPrev(); }
-      else if (/^[1-9]$/.test(k)) {
+      // 1-5 rate the current photo (takes priority over the time-based
+      // suggestion shortcuts below — rating is the more commonly wanted
+      // action). 0 clears a rating. Suggestions remain reachable at their
+      // real numbered positions 6-9 (and by clicking any suggestion chip).
+      else if (/^[1-5]$/.test(k)) { e.preventDefault(); ratePhoto(current(), +k); }
+      else if (k === "0") { e.preventDefault(); ratePhoto(current(), 0); }
+      else if (/^[6-9]$/.test(k)) {
         e.preventDefault();
         const sp = suggestSpecies(current().datetime);
         const n = +k;
@@ -3280,7 +3512,6 @@
     // session-only copy. "Remember" state is inferred from where it lives.
     S.inatToken = LS.get("inatToken", "") || SS.get("inatToken", "");
     S.inatTokenRemember = !!LS.get("inatToken", "");
-    S.mapVisible = LS.get("mapVisible", false);
     S.infoVisible = LS.get("infoVisible", true);
     S.watermark = LS.get("watermark", { enabled: false, text: "", position: "br", font: "sans", sizePct: 2.8 });
     S.perSpeciesFolders = LS.get("perSpeciesFolders", false);
@@ -3290,14 +3521,17 @@
   }
 
   // Show/hide the on-photo info overlay (filename, status, date, time,
-  // caption, keywords), and reflect the state on the toggle button.
+  // caption, keywords) — and, tied to the same toggle, the map preview and
+  // the filmstrip — and reflect the state on the toggle button.
   function applyInfoVisibility() {
     if ($("meta")) $("meta").hidden = !S.infoVisible || !current();
     if ($("statusCorner")) $("statusCorner").hidden = !S.infoVisible || !current();
     if ($("inatPhotoMeta")) $("inatPhotoMeta").hidden = !S.infoVisible || !current();
+    renderPhotoControls();
+    syncFilmstrip();
     const btn = $("infoToggleBtn");
     btn.setAttribute("aria-pressed", String(S.infoVisible));
-    btn.title = S.infoVisible ? "Hide photo info (filename, status, date, time, caption, keywords)" : "Show photo info (filename, status, date, time, caption, keywords)";
+    btn.title = S.infoVisible ? "Hide photo info (filename, status, date, time, caption, keywords, map, filmstrip)" : "Show photo info (filename, status, date, time, caption, keywords, map, filmstrip)";
     const inatBtn = $("inatInfoToggleBtn");
     if (inatBtn) inatBtn.setAttribute("aria-pressed", String(S.infoVisible));
   }

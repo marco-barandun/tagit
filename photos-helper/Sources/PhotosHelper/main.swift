@@ -25,10 +25,11 @@ while i < args.count {
 // Launched from a terminal (swift run, or a .command double-click) vs.
 // launched as a real app (Finder double-click, or tagit's web page opening
 // the tagitphotos:// link) — the latter has no terminal to print the
-// pairing code into, so it gets a small native window instead. Terminal
-// launches also cause Photos to attribute the permission prompts to
-// Terminal.app itself rather than to this app; the windowed path is the
-// one that gets those prompts correctly attributed to "tagit Photos Helper".
+// pairing code into, so it gets a menu bar icon instead (never a window —
+// see StatusMenu.swift). Terminal launches also cause Photos to attribute
+// the permission prompts to Terminal.app itself rather than to this app;
+// the menu-bar path is the one that gets those prompts correctly attributed
+// to "tagit Photos Helper".
 let isTerminal = isatty(fileno(stdout)) != 0
 
 if isTerminal {
@@ -64,22 +65,24 @@ var provider: PhotosProvider?
 // created it returns, and every future connection silently goes nowhere.
 var keepAliveServer: HTTPServer?
 
-var statusController: PairingWindowController?
+var statusMenu: StatusMenuController?
 var currentToken = Security.generateToken()
 var autoPaired = false
 var lastActivity = Date()
 
-func refreshStatusWindow() {
+// The menu bar icon is the entirety of this app's on-screen presence when
+// running as a real app — created once, then just updated in place. Never a
+// window, never something that pops to the front or steals focus.
+func refreshStatusMenu() {
     guard !isTerminal else { return }
-    statusController?.closeQuietly()
-    statusController = PairingWindowController(
+    if statusMenu == nil {
+        statusMenu = StatusMenuController(onQuit: { NSApplication.shared.terminate(nil) })
+    }
+    statusMenu?.update(
         mode: provider?.modeDescription ?? (isDemo ? "demo — waiting for an album pick in tagit" : "waiting for an album to be chosen in tagit"),
-        album: provider?.albumTitle ?? "none yet — chosen from tagit",
-        token: currentToken, port: port, autoPaired: autoPaired,
-        onQuit: { NSApplication.shared.terminate(nil) }
+        album: provider?.albumTitle ?? "",
+        token: currentToken, autoPaired: autoPaired
     )
-    statusController?.showWindow(nil)
-    NSApplication.shared.activate(ignoringOtherApps: true)
 }
 
 // Selecting the album (from tagit, over the paired connection). In demo mode
@@ -88,7 +91,7 @@ func refreshStatusWindow() {
 func selectAlbum(id: String) throws -> String {
     if isDemo {
         if provider == nil { provider = MockPhotosProvider() }
-        DispatchQueue.main.async { refreshStatusWindow() }
+        DispatchQueue.main.async { refreshStatusMenu() }
         return provider!.albumTitle
     }
     let fetch = PHAssetCollection.fetchAssetCollections(withLocalIdentifiers: [id], options: nil)
@@ -97,7 +100,7 @@ func selectAlbum(id: String) throws -> String {
     }
     let live = LivePhotosProvider(album: collection)
     provider = live
-    DispatchQueue.main.async { refreshStatusWindow() }
+    DispatchQueue.main.async { refreshStatusMenu() }
     return live.albumTitle
 }
 
@@ -167,6 +170,16 @@ func route(_ req: HTTPServer.Request) -> HTTPServer.Response {
             let obj = try JSONSerialization.jsonObject(with: encoded)
             return .json(["photos": obj])
 
+        case ("POST", ["photos", "meta"]):
+            let obj = try JSONSerialization.jsonObject(with: req.body) as? [String: Any]
+            guard let ids = obj?["ids"] as? [String], !ids.isEmpty else {
+                return .jsonError(400, "missing ids")
+            }
+            let meta = try ready().metaFor(ids: ids)
+            var out: [String: Any] = [:]
+            for (id, m) in meta { out[id] = ["caption": m.caption, "keywords": m.keywords] }
+            return .json(["meta": out])
+
         case ("GET", let p) where p.count == 3 && p[0] == "photos" && p[2] == "image":
             let data = try ready().imageData(for: p[1])
             return .raw(contentType: "image/jpeg", body: data)
@@ -182,6 +195,12 @@ func route(_ req: HTTPServer.Request) -> HTTPServer.Response {
                 return .jsonError(400, "missing or out-of-range lat/lon")
             }
             try ready().updateLocation(for: p[1], lat: lat, lon: lon)
+            return .json(["ok": true])
+
+        case ("POST", let p) where p.count == 3 && p[0] == "photos" && p[2] == "favorite":
+            let obj = try JSONSerialization.jsonObject(with: req.body) as? [String: Any]
+            guard let fav = obj?["favorite"] as? Bool else { return .jsonError(400, "missing favorite") }
+            try ready().setFavorite(for: p[1], favorite: fav)
             return .json(["ok": true])
 
         case ("POST", let p) where p.count == 3 && p[0] == "photos" && p[2] == "caption":
@@ -251,7 +270,7 @@ final class HelperAppDelegate: NSObject, NSApplicationDelegate {
             currentToken = secret
             keepAliveServer?.updateToken(secret)
             autoPaired = true
-            refreshStatusWindow()
+            refreshStatusMenu()
         }
     }
 }
@@ -271,7 +290,7 @@ if isDemo {
         app.setActivationPolicy(.accessory)
         app.delegate = appDelegate
         startServer()
-        refreshStatusWindow()
+        refreshStatusMenu()
         scheduleIdleShutdown()
         app.run()
     }
@@ -297,7 +316,7 @@ if isDemo {
         app.setActivationPolicy(.accessory)
         app.delegate = appDelegate
         startServer()
-        refreshStatusWindow()
+        refreshStatusMenu()
         scheduleIdleShutdown()
         app.run()
     }

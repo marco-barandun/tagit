@@ -37,9 +37,15 @@ final class MockPhotosProvider: PhotosProvider {
         }
     }
 
+    // Mirrors LivePhotosProvider's contract exactly (blank caption/keywords
+    // here, real values from metaFor(ids:)) so the demo flow exercises the
+    // same fast-list-then-meta-trickle behavior as the real thing.
     func listPhotos() throws -> [PhotoInfo] {
         lock.lock(); defer { lock.unlock() }
-        return entries.map { $0.info }
+        return entries.map { e in
+            PhotoInfo(id: e.info.id, filename: e.info.filename, dateTaken: e.info.dateTaken,
+                      lat: e.info.lat, lon: e.info.lon, caption: "", keywords: [])
+        }
     }
 
     func imageData(for photoID: String) throws -> Data {
@@ -54,6 +60,23 @@ final class MockPhotosProvider: PhotosProvider {
 
     func thumbnailData(for photoID: String) throws -> Data {
         try imageData(for: photoID)   // demo images are tiny already
+    }
+
+    func metaFor(ids: [String]) throws -> [String: (caption: String, keywords: [String])] {
+        lock.lock(); defer { lock.unlock() }
+        var out: [String: (caption: String, keywords: [String])] = [:]
+        for e in entries where ids.contains(e.info.id) {
+            out[e.info.id] = (e.info.caption, e.info.keywords)
+        }
+        return out
+    }
+
+    func setFavorite(for photoID: String, favorite: Bool) throws {
+        lock.lock(); defer { lock.unlock() }
+        guard entries.contains(where: { $0.info.id == photoID }) else {
+            throw HelperError(message: "no such demo photo")
+        }
+        // Demo mode never touches anything real — nothing to persist.
     }
 
     func updateCaption(for photoID: String, caption: String, keywords: [String]) throws {

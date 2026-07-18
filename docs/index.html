@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>tagit — caption plant &amp; animal photos in your browser</title>
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Cpath d='M25 6C13 6 7 13 7 22c0 1 0 2 .3 3C10 18 16 14 22 12c-5 3-9 7-11 14 10 1 16-6 16-16 0-2 0-3-2-4z' fill='%232f6b47'/%3E%3C/svg%3E">
-  <link rel="stylesheet" href="styles.css?v=17">
+  <link rel="stylesheet" href="styles.css?v=18">
   <link rel="stylesheet" href="vendor/leaflet.css">
   <script>
     // Set theme before first paint to avoid a flash.
@@ -365,10 +365,11 @@
           <li>Full folder editing works in Chrome/Edge/Brave/Arc. Safari/Firefox: drag in and download copies.</li>
           <li>This build handles <strong>JPEG</strong> only — RAW/HEIC need the desktop version.</li>
           <li><strong>Connect to Photos</strong> tags photos straight from your Apple Photos library via a small local helper app — captions/keywords are written with Photos' own scripting interface, so nothing is exported or re-imported. Rotate and watermark aren't available for these photos yet.</li>
-          <li><strong>Filmstrip</strong>: the thumbnail row above the photo jumps anywhere with a click; shift-click selects a range and Cmd/Ctrl-click toggles single photos for bulk actions (apply one caption, skip, delete — one Undo reverts the whole batch).</li>
+          <li><strong>Filmstrip</strong>: the thumbnail row above the photo jumps anywhere with a click; shift-click selects a range and Cmd/Ctrl-click toggles single photos for bulk actions (apply one caption, skip, delete, or post them all as ONE grouped iNaturalist observation — one Undo reverts a batch caption/skip/delete).</li>
+          <li><strong>Rating</strong>: press <strong>1–5</strong> to rate the current photo (★ shows in its keywords, including in Apple Photos' own search) — <strong>5</strong> also marks it a Photos favorite. <strong>0</strong> clears a rating. Click the star row in the photo info to rate with the mouse instead.</li>
           <li><strong>iNaturalist</strong>: paste a token in the iNaturalist tab, then click <em>Identify with iNaturalist</em> to get AI suggestions (with confidence %) for the current photo (uses its GPS &amp; date).</li>
           <li><strong>Map</strong>: photos with GPS get a <em>Show map</em> control in the photo info; it appears as a small preview in the photo's bottom-right corner — click it to enlarge.</li>
-          <li>Keys: ← → navigate · 1–9 pick a suggestion · Delete discard (only with nothing selected). Just start typing a letter anywhere to jump into the search box — Rotate/Undo/Can’t-determine/Same-as-previous are one click away as buttons instead of shortcut letters, so a letter key always means “start a search.”</li>
+          <li>Keys: ← → navigate · 1–5 rate · 6–9 pick a suggestion · Delete discard (only with nothing selected). Just start typing a letter anywhere to jump into the search box — Rotate/Undo/Can’t-determine/Same-as-previous are one click away as buttons instead of shortcut letters, so a letter key always means “start a search.”</li>
           <li>In the search box, type an abbreviation of each word — e.g. <code>dro rot</code> for <em>Drosera rotundifolia</em>, <code>dact fuch</code> for <em>Dactylorhiza maculata</em> subsp. <em>fuchsii</em> — then press <strong>Enter</strong> to save that match and move to the next photo in one step. Clicking a suggestion/recently-used chip instead just adds it to the current determination without saving.</li>
         </ul>
       </div>
@@ -479,6 +480,7 @@
       <div id="bulkBar" class="bulk-bar" hidden>
         <span id="bulkCount"></span>
         <button id="bulkApplyBtn" class="btn">Apply caption to all</button>
+        <button id="bulkInatBtn" class="btn btn-inat">Post as one iNat observation</button>
         <button id="bulkSkipBtn" class="btn">Skip</button>
         <button id="bulkUndetBtn" class="btn">Can’t determine</button>
         <button id="bulkDeleteBtn" class="btn btn-danger">Delete</button>
@@ -515,7 +517,7 @@
   </main>
 
   <script src="metadata.js?v=13"></script>
-  <script src="app.js?v=20"></script>
+  <script src="app.js?v=22"></script>
   <script>
     (() => {
       const root = document.documentElement;

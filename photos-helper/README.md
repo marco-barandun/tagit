@@ -26,10 +26,12 @@ app that runs on your own Mac and talks to the tagit web page over
 - Captions and keywords are written using Photos' own scripting interface
   (the same mechanism AppleScript automation uses) — not by exporting a copy,
   editing it, and re-importing it. The photo never leaves Photos.
+- The helper has no window at all — just a small icon in the menu bar (click
+  it for status and to quit). Nothing ever pops up or grabs focus on its own.
 - Ending access is immediate and can be done from either side: **Disconnect &
-  quit helper** in tagit's dialog, the **Quit Helper** button in the helper's
-  own little window, or just closing that window. It also quits by itself
-  after an hour with no activity, so access never quietly lingers.
+  quit helper** in tagit's dialog, or **Quit Helper** from the menu bar icon.
+  It also quits by itself after an hour with no activity, so access never
+  quietly lingers.
 
 ## Setup
 
@@ -46,8 +48,8 @@ then on.
 2. **Open it once by hand** — double-click `dist/tagit Photos Helper.app`
    (it's unsigned, so the first launch needs an extra step: right-click →
    **Open** → **Open** again in the dialog that appears; this registers it
-   with macOS so tagit's web page can launch it directly afterward). Quit it
-   again from its window.
+   with macOS so tagit's web page can launch it directly afterward). A small
+   icon appears in the menu bar — that's the whole UI. Quit it from there.
 3. **From then on**, just click **Connect to Photos** in tagit and approve
    the browser's "open app" prompt. **The first real run only**, macOS will
    also ask twice:
@@ -59,7 +61,7 @@ then on.
 4. **Pick an album** in tagit's own picker, and start tagging. Next time,
    your last album is used automatically.
 5. **When you're done**: **Connect to Photos → Disconnect & quit helper**
-   (or quit the helper's window directly).
+   (or **Quit Helper** from its menu bar icon).
 
 The pairing secret is never saved anywhere (not in the browser, not on
 disk) — it's minted fresh for every connection and lives only in memory on
@@ -72,9 +74,10 @@ usually because it's never been opened once by hand (step 2 above), or it was
 moved/deleted after being registered. Open `dist/tagit Photos Helper.app`
 directly once (double-click it in Finder), then try the button again.
 
-If tagit says it can't connect and you built the helper **before** automatic
-pairing existed, an old helper instance may still be running — quit it (its
-window or terminal), rebuild with `./build-app.sh`, and reconnect.
+If tagit says it can't connect, an old helper instance may still be running
+from before — quit it (its menu bar icon, or Control-C if it's in a
+terminal), rebuild with `./build-app.sh` if you changed the source, and
+reconnect.
 
 ### Trying it risk-free with fake photos first
 
@@ -86,19 +89,26 @@ never touches Photos or asks for any permission at all.
 
 ## What's not supported yet
 
-Because the helper never rewrites the image itself (only caption/keywords,
-via Photos' own scripting interface — never the pixel data), a few
-byte-level features from the folder-based workflow aren't available for
-Photos library images: **Rotate**, the **watermark**, and **writing an
-estimated GPS location**. Everything else — determination, captions,
-keywords, skip/undetermined/delete, undo, iNaturalist identify/create/sync,
-and the already-posted-photo screener — works the same as the folder
-workflow.
+Because the helper never rewrites the image's pixel data, two byte-level
+features from the folder-based workflow aren't available for Photos library
+images: **Rotate** and the **watermark**. Everything else — determination,
+captions, keywords, star ratings, skip/undetermined/delete, undo,
+estimated-location (PhotosKit does support writing GPS), iNaturalist
+identify/create/sync (including grouping several photos into one
+observation), and the already-posted-photo screener — works the same as the
+folder workflow.
 
 Status (labelled/skipped/undetermined/deleted) has no folder to move photos
 into in Photos, so it's tracked with a hidden keyword instead (e.g.
 `tagit:labelled`) that's written alongside your real keywords and stripped
-back out before anything is shown to you.
+back out before anything is shown to you. Star ratings, by contrast, are a
+normal, visible keyword (`★★★★★`, one per photo) — searchable in Photos
+itself; rating a photo 5 stars also sets Photos' native favorite.
+
+Loading a big album is fast: the initial photo list comes from PhotosKit
+alone (no AppleScript), and captions/keywords — the slow part, since they go
+through Photos' scripting interface — stream in afterward in the background,
+prioritized around whichever photo you're actually looking at.
 
 ## Advanced: running from source / a different port
 

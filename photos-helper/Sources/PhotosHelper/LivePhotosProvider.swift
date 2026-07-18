@@ -142,28 +142,32 @@ final class LivePhotosProvider: PhotosProvider {
         return a
     }
 
+    /// PhotosKit-only — no AppleScript, so this returns instantly regardless
+    /// of library size. Caption/keywords always come back empty; the caller
+    /// fetches those separately via metaFor(ids:), in whatever order it
+    /// actually needs them.
     func listPhotos() throws -> [PhotoInfo] {
         let fmt = ISO8601DateFormatter()
-        // One batched AppleScript pass for all captions/keywords instead of a
-        // script compile+execute per photo — the difference between seconds
-        // and minutes on a big album. Best-effort: if Photos automation isn't
-        // approved yet, or a lookup fails, those photos just show as untagged
-        // rather than failing the whole listing.
-        let meta = PhotosScripting.getCaptionsAndKeywords(ids: assets.map { $0.localIdentifier })
         return assets.map { asset in
-            let got = meta[asset.localIdentifier]
-            let caption = got?.caption ?? ""
-            let keywords = got?.keywords ?? []
-            return PhotoInfo(
+            PhotoInfo(
                 id: asset.localIdentifier,
                 filename: asset.value(forKey: "filename") as? String ?? "\(asset.localIdentifier).jpg",
                 dateTaken: asset.creationDate.map { fmt.string(from: $0) },
                 lat: asset.location?.coordinate.latitude,
                 lon: asset.location?.coordinate.longitude,
-                caption: caption,
-                keywords: keywords
+                caption: "",
+                keywords: []
             )
         }
+    }
+
+    /// The AppleScript-backed part split out of listPhotos() — one batched
+    /// script per 100-photo chunk (see PhotosScripting), so a caller asking
+    /// for just the photos currently on screen never pays for the whole
+    /// album. Only ever looks up ids that are actually in this album.
+    func metaFor(ids: [String]) throws -> [String: (caption: String, keywords: [String])] {
+        let known = Set(assets.map { $0.localIdentifier })
+        return PhotosScripting.getCaptionsAndKeywords(ids: ids.filter { known.contains($0) })
     }
 
     func imageData(for photoID: String) throws -> Data {
@@ -230,6 +234,22 @@ final class LivePhotosProvider: PhotosProvider {
         } catch { changeError = error }
         if let changeError {
             throw HelperError(message: "could not write the location: \(changeError.localizedDescription)")
+        }
+    }
+
+    /// Sets the native Photos favorite (heart icon) — confirmed against the
+    /// real SDK headers: `PHAssetChangeRequest.favorite` (Swift: isFavorite)
+    /// is genuinely readwrite, unlike caption/keywords.
+    func setFavorite(for photoID: String, favorite: Bool) throws {
+        let a = try asset(photoID)
+        var changeError: Error?
+        do {
+            try PHPhotoLibrary.shared().performChangesAndWait {
+                PHAssetChangeRequest(for: a).isFavorite = favorite
+            }
+        } catch { changeError = error }
+        if let changeError {
+            throw HelperError(message: "could not set favorite: \(changeError.localizedDescription)")
         }
     }
 
