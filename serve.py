@@ -27,4 +27,5 @@ class NoCacheHandler(http.server.SimpleHTTPRequestHandler):
 
 if __name__ == "__main__":
     Handler = functools.partial(NoCacheHandler, directory=DOCS_DIR)
-    http.server.test(HandlerClass=Handler, port=PORT)
+    # Loopback only — a dev server has no business being reachable from the LAN.
+    http.server.test(HandlerClass=Handler, port=PORT, bind="127.0.0.1")

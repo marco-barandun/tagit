@@ -171,6 +171,19 @@ func route(_ req: HTTPServer.Request) -> HTTPServer.Response {
             let data = try ready().imageData(for: p[1])
             return .raw(contentType: "image/jpeg", body: data)
 
+        case ("GET", let p) where p.count == 3 && p[0] == "photos" && p[2] == "thumbnail":
+            let data = try ready().thumbnailData(for: p[1])
+            return .raw(contentType: "image/jpeg", body: data)
+
+        case ("POST", let p) where p.count == 3 && p[0] == "photos" && p[2] == "location":
+            let obj = try JSONSerialization.jsonObject(with: req.body) as? [String: Any]
+            guard let lat = obj?["lat"] as? Double, let lon = obj?["lon"] as? Double,
+                  (-90...90).contains(lat), (-180...180).contains(lon) else {
+                return .jsonError(400, "missing or out-of-range lat/lon")
+            }
+            try ready().updateLocation(for: p[1], lat: lat, lon: lon)
+            return .json(["ok": true])
+
         case ("POST", let p) where p.count == 3 && p[0] == "photos" && p[2] == "caption":
             let update = try JSONDecoder().decode(CaptionUpdate.self, from: req.body)
             try ready().updateCaption(for: p[1], caption: update.caption, keywords: update.keywords)

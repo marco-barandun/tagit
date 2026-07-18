@@ -54,6 +54,8 @@
     obs: [],               // [{species, datetime:Date, locality}]
     sessionFamilies: new Map(),
     statusFilter: new Set(["untouched", "preexisting", "labelled", "skipped", "undetermined", "deleted"]),
+    multiSel: new Set(),   // filmstrip multi-selection (photo indices)
+    selAnchor: null,       // anchor index for shift-click ranges
     metaToken: 0,          // invalidates in-flight background metadata reads on reload
     inatToken: "",         // iNaturalist API token (browser-only)
     inatResults: [],       // last CV suggestions
@@ -86,6 +88,14 @@
   const LS = {
     get(k, d) { try { return JSON.parse(localStorage.getItem("tagit." + k)) ?? d; } catch { return d; } },
     set(k, v) { try { localStorage.setItem("tagit." + k, JSON.stringify(v)); } catch {} },
+    del(k) { try { localStorage.removeItem("tagit." + k); } catch {} },
+  };
+  // Session-scoped twin of LS — survives reloads, gone when the browser
+  // closes. Used for the iNaturalist token when "remember" is off.
+  const SS = {
+    get(k, d) { try { return JSON.parse(sessionStorage.getItem("tagit." + k)) ?? d; } catch { return d; } },
+    set(k, v) { try { sessionStorage.setItem("tagit." + k, JSON.stringify(v)); } catch {} },
+    del(k) { try { sessionStorage.removeItem("tagit." + k); } catch {} },
   };
   // IndexedDB — only to remember the last directory handle across reloads.
   const idb = {
@@ -707,6 +717,14 @@
 
   // ---- iNaturalist: create an observation and link it to the photo ---------
   const inatIdFromUrl = (url) => { const m = (url || "").match(/observations\/(\d+)/); return m ? m[1] : ""; };
+  // The observation link is rendered as a clickable href, but it can arrive
+  // from untrusted places — the XMP metadata of a dragged-in JPEG, or an API
+  // response. Never trust it as-is: rebuild it from the numeric id or drop
+  // it, so a crafted file can't smuggle a javascript: URL into the page.
+  const sanitizeInatUrl = (url) => {
+    const id = inatIdFromUrl(url);
+    return id ? `https://www.inaturalist.org/observations/${id}` : "";
+  };
   async function resizeJpeg(file, maxDim) {
     const bmp = await createImageBitmap(file);
     const scale = Math.min(1, maxDim / Math.max(bmp.width, bmp.height));
@@ -907,7 +925,9 @@
     let photoUrl = photo && (photo.url || "");
     if (photoUrl) photoUrl = photoUrl.replace(/square/, "medium");
     return {
-      id: o.id, uri: o.uri || ("https://www.inaturalist.org/observations/" + o.id),
+      // Always rebuild the link from the numeric id — never pass an API-supplied
+      // URL through to an href (see sanitizeInatUrl).
+      id: o.id, uri: "https://www.inaturalist.org/observations/" + o.id,
       datetime: dt, taxonName, photoUrl, qualityGrade: o.quality_grade || "",
     };
   }
@@ -1227,12 +1247,38 @@
     if (est.method === "extrapolated") return `Extrapolated from the trend between ${parts.join(" and ")} — no photo brackets this one in time, so treat this as a rougher guess.${distNote}`;
     return `Based on the single nearest dated, GPS-tagged photo: ${parts[0]} — no trend available, so this just reuses its position.`;
   }
-  let estimateMap = null, estimateLayer = null;
+  let estimateMap = null, estimateLayer = null, estimatePointMarker = null;
   function ensureEstimateMap() {
     if (estimateMap) return estimateMap;
     estimateMap = L.map("estimateLocationMap");
     addTileLayer(estimateMap);
+    // The estimate is a starting point, not a verdict — clicking the map
+    // moves the point, so it can be fine-tuned before anything is written.
+    estimateMap.on("click", (e) => {
+      if (!S.estimateResult) return;
+      S.estimateResult = { ...S.estimateResult, lat: e.latlng.lat, lon: e.latlng.lng, method: "manual" };
+      redrawEstimatePoint();
+      $("estimateLocationExplain").textContent = "Custom point — picked by hand on the map. Click again to move it, or use a button below.";
+    });
     return estimateMap;
+  }
+  function redrawEstimatePoint() {
+    const est = S.estimateResult;
+    if (!est || !estimateMap) return;
+    if (estimatePointMarker) estimatePointMarker.setLatLng([est.lat, est.lon]);
+    else estimatePointMarker = L.circleMarker([est.lat, est.lon], MARKER_STYLE).addTo(estimateMap);
+  }
+  // The single photo closest in time that has real GPS — offered as a
+  // one-click alternative to the interpolated estimate.
+  function nearestGpsPhoto(p) {
+    if (!p || !p.datetime) return null;
+    let best = null, bestGap = Infinity;
+    for (const q of S.photos) {
+      if (q === p || !q.datetime || q.lat == null || q.lon == null) continue;
+      const gap = Math.abs(q.datetime - p.datetime);
+      if (gap < bestGap) { bestGap = gap; best = q; }
+    }
+    return best ? { photo: best, gapMin: Math.round(bestGap / 60000) } : null;
   }
   function openEstimateLocationModal() {
     const p = current();
@@ -1244,17 +1290,13 @@
 
     openModal("estimateLocationModal");
     const map = ensureEstimateMap();
-    if (estimateLayer) { estimateLayer.remove(); estimateLayer = null; }
-    const group = L.layerGroup();
+    if (estimateLayer) { try { estimateLayer.remove(); } catch { /* half-added layers */ } estimateLayer = null; }
+    if (estimatePointMarker) { try { estimatePointMarker.remove(); } catch { } estimatePointMarker = null; }
     const points = est.basis.map((b) => [b.lat, b.lon]);
-    if (points.length > 1) L.polyline(points, { color: "#4a90d9", weight: 2, dashArray: "5,6" }).addTo(group);
-    est.basis.forEach((b) => {
-      L.circleMarker([b.lat, b.lon], { radius: 6, color: "#fff", weight: 2, fillColor: "#4a90d9", fillOpacity: 1 })
-        .bindTooltip(`${b.name} — ${fmtTime(b.datetime)}`)
-        .addTo(group);
-    });
-    L.circleMarker([est.lat, est.lon], MARKER_STYLE).addTo(group);
-    estimateLayer = group.addTo(map);
+    // Set the view BEFORE adding any vector layers: on a freshly-created map,
+    // layers added pre-view initialize deferred inside fitBounds, and
+    // Leaflet's renderer then updates against half-projected paths
+    // (undefined _pxBounds → crash deep in Bounds.intersects).
     // With only one basis point, est.lat/lon equals it exactly — a
     // zero-size bounds, which would make fitBounds zoom in to the max
     // level instead of a sensible overview.
@@ -1263,20 +1305,56 @@
     } else {
       map.setView([est.lat, est.lon], 14);
     }
+    const group = L.layerGroup();
+    if (points.length > 1) L.polyline(points, { color: "#4a90d9", weight: 2, dashArray: "5,6" }).addTo(group);
+    est.basis.forEach((b) => {
+      L.circleMarker([b.lat, b.lon], { radius: 6, color: "#fff", weight: 2, fillColor: "#4a90d9", fillOpacity: 1 })
+        .bindTooltip(`${b.name} — ${fmtTime(b.datetime)}`)
+        .addTo(group);
+    });
+    estimateLayer = group.addTo(map);
+    redrawEstimatePoint();
     setTimeout(() => map.invalidateSize(), 50);
 
-    $("estimateLocationExplain").textContent = describeEstimate(p, est);
+    // Offer "same spot as the photo taken closest in time" as a one-click
+    // alternative to the interpolated guess.
+    const nearest = nearestGpsPhoto(p);
+    const snapBtn = $("estimateSnapBtn");
+    if (snapBtn) {
+      snapBtn.hidden = !nearest;
+      if (nearest) {
+        snapBtn.textContent = `Use “${nearest.photo.name}”'s location (closest in time, ${nearest.gapMin} min away)`;
+        snapBtn.onclick = () => {
+          S.estimateResult = { ...S.estimateResult, lat: nearest.photo.lat, lon: nearest.photo.lon, method: "nearest" };
+          redrawEstimatePoint();
+          estimateMap.setView([nearest.photo.lat, nearest.photo.lon], Math.max(estimateMap.getZoom(), 15));
+          $("estimateLocationExplain").textContent =
+            `Same location as “${nearest.photo.name}” (${nearest.gapMin} min ${nearest.photo.datetime < p.datetime ? "earlier" : "later"}). Click the map to fine-tune before saving.`;
+        };
+      }
+    }
+
+    $("estimateLocationExplain").textContent = describeEstimate(p, est) + " Click the map to adjust the red point before saving.";
   }
   async function confirmEstimatedLocation() {
     const p = S.estimateTarget, est = S.estimateResult;
     if (!p || !est) return;
-    if (S.mode === "applephotos") { toast("Writing an estimated location isn't available for Photos library images yet.", "info", 5000); closeModal("estimateLocationModal"); return; }
     setBusy("Writing location…");
     try {
-      const bytes = TagMeta.writeGps(await getFileBytes(p), est.lat, est.lon);
-      if (S.mode === "download") downloadBytes(p.name, bytes);
-      else p.fileHandle = await writeBytesTo(p.parentHandle, p.name, bytes);
-      p.lat = est.lat; p.lon = est.lon; p.url = null;
+      if (S.mode === "applephotos") {
+        // PhotosKit's change API does support writing an asset's location
+        // (unlike caption/keywords) — the helper does it natively.
+        await apFetch(`/photos/${encodeURIComponent(p.assetId)}/location`, {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ lat: est.lat, lon: est.lon }),
+        });
+      } else {
+        const bytes = TagMeta.writeGps(await getFileBytes(p), est.lat, est.lon);
+        if (S.mode === "download") downloadBytes(p.name, bytes);
+        else p.fileHandle = await writeBytesTo(p.parentHandle, p.name, bytes);
+        p.url = null;   // file bytes changed; Photos-mode pixels didn't
+      }
+      p.lat = est.lat; p.lon = est.lon;
       closeModal("estimateLocationModal");
       S.estimateTarget = null; S.estimateResult = null;
       render();
@@ -1478,6 +1556,7 @@
     if (S.idx < 0) S.idx = 0;
     S.undo = null;
     S.inatResults = []; S.inatResultsFor = null;
+    S.multiSel.clear(); S.selAnchor = null; S._filmSig = null;
     clearSelection();
     render();
     // Apple Photos mode already gets datetime/GPS/caption/keywords from the
@@ -1510,7 +1589,7 @@
         const m = await withTimeout(TagMeta.readMeta(file), 6000);
         p.datetime = m.datetime ? new Date(m.datetime.getTime() + CFG.cameraClockOffsetHours * 3600000) : null;
         p.lat = m.lat; p.lon = m.lon; p.orientation = m.orientation;
-        p.keywords = m.keywords || []; p.inatUrl = m.inatUrl || "";
+        p.keywords = m.keywords || []; p.inatUrl = sanitizeInatUrl(m.inatUrl);
         if (!p.caption) p.caption = m.caption;            // keep a caption we already know
         if (p === S.photos[S.idx]) render();              // refresh date/suggestions live
       } catch (e) { /* leave this photo's date blank; it still tags fine */ }
@@ -1595,7 +1674,9 @@
   }
   function inatUrlFromKeywords(keywords) {
     const kw = (keywords || []).find((k) => k.startsWith(INAT_KW_PREFIX));
-    return kw ? `https://www.inaturalist.org/observations/${kw.slice(INAT_KW_PREFIX.length)}` : "";
+    const id = kw ? kw.slice(INAT_KW_PREFIX.length) : "";
+    // Digits only — the marker keyword is user-editable in Photos itself.
+    return /^\d+$/.test(id) ? `https://www.inaturalist.org/observations/${id}` : "";
   }
   function withReservedKeywords(keywords, status, inatUrl) {
     const clean = stripReservedKeywords(keywords);
@@ -1820,7 +1901,10 @@
     const baseUrl = (($("photosConnectUrl") && $("photosConnectUrl").value.trim()) || "http://127.0.0.1:8765").replace(/\/+$/, "");
     const hint = $("photosConnectHint");
     hint.textContent = "Launching the helper… approve the browser's “open app” prompt, and macOS's Photos prompts if they appear.";
-    window.location.href = "tagitphotos://start?pair=" + secret;
+    // location.replace, not location.href: the launch URL carries the pairing
+    // secret, and replace() doesn't add a history entry — so the secret never
+    // lands in the browser's history.
+    window.location.replace("tagitphotos://start?pair=" + secret);
     const deadline = Date.now() + 90000;   // generous — first run includes permission dialogs
     while (Date.now() < deadline) {
       await sleep(1000);
@@ -2026,6 +2110,189 @@
     let i = 1;
     while (await exists(`${base}_${i}${ext}`)) i++;
     return `${base}_${i}${ext}`;
+  }
+
+  // ---- filmstrip + multi-select --------------------------------------------
+  // A row of thumbnails above the photo: click to jump, shift-click to select
+  // a range, Cmd/Ctrl-click to toggle one — selections feed the bulk bar.
+  let filmObserver = null;
+  async function thumbUrlFor(p) {
+    if (p._thumbUrl) return p._thumbUrl;
+    if (S.mode === "applephotos") {
+      const res = await apFetch(`/photos/${encodeURIComponent(p.assetId)}/thumbnail`);
+      p._thumbUrl = URL.createObjectURL(await res.blob());
+    } else {
+      const bmp = await createImageBitmap(await getFile(p), { resizeWidth: 160, resizeQuality: "low" });
+      const c = document.createElement("canvas"); c.width = bmp.width; c.height = bmp.height;
+      c.getContext("2d").drawImage(bmp, 0, 0);
+      if (bmp.close) bmp.close();
+      const blob = await new Promise((r) => c.toBlob(r, "image/jpeg", 0.7));
+      p._thumbUrl = URL.createObjectURL(blob);
+    }
+    return p._thumbUrl;
+  }
+  function rebuildFilmstrip() {
+    const strip = $("filmstrip");
+    if (!strip) return;
+    if (filmObserver) filmObserver.disconnect();
+    strip.innerHTML = "";
+    const vis = visibleIdx();
+    if (!vis.length) { strip.hidden = true; updateBulkBar(); return; }
+    strip.hidden = false;
+    filmObserver = new IntersectionObserver((entries) => {
+      for (const en of entries) {
+        if (!en.isIntersecting) continue;
+        filmObserver.unobserve(en.target);
+        const p = S.photos[+en.target.dataset.idx];
+        if (p) thumbUrlFor(p).then((u) => { en.target.src = u; }).catch(() => {});
+      }
+    }, { root: strip, rootMargin: "500px" });
+    for (const i of vis) {
+      const p = S.photos[i];
+      const img = el("img", { alt: "" });
+      img.dataset.idx = i;
+      if (p._thumbUrl) img.src = p._thumbUrl;
+      const dot = el("span", { className: "film-dot" });
+      const cell = el("button", { type: "button", className: "film-cell", title: p.name }, [img, dot]);
+      cell.dataset.idx = i;
+      cell.onclick = (e) => onFilmCellClick(i, e);
+      strip.append(cell);
+      if (!p._thumbUrl) filmObserver.observe(img);
+    }
+    syncFilmstrip();
+  }
+  // Cheap per-render pass: highlight current/selected, refresh status dots,
+  // keep the current photo scrolled into view. No DOM rebuilding.
+  function syncFilmstrip() {
+    const strip = $("filmstrip");
+    if (!strip || strip.hidden) { updateBulkBar(); return; }
+    for (const cell of strip.children) {
+      const i = +cell.dataset.idx;
+      const p = S.photos[i];
+      cell.classList.toggle("multisel", S.multiSel.has(i));
+      cell.classList.toggle("current", i === S.idx);
+      const dot = cell.querySelector(".film-dot");
+      if (p && dot) dot.style.background = STATUS_LABEL[p.status].color;
+    }
+    const cur = strip.querySelector(".film-cell.current");
+    if (cur) cur.scrollIntoView({ block: "nearest", inline: "nearest" });
+    updateBulkBar();
+  }
+  function onFilmCellClick(i, e) {
+    if (e.shiftKey && S.selAnchor != null) {
+      const vis = visibleIdx();
+      const a = vis.indexOf(S.selAnchor), b = vis.indexOf(i);
+      if (a >= 0 && b >= 0) {
+        const [lo, hi] = a < b ? [a, b] : [b, a];
+        for (let k = lo; k <= hi; k++) S.multiSel.add(vis[k]);
+      }
+      syncFilmstrip();
+    } else if (e.metaKey || e.ctrlKey) {
+      if (S.multiSel.has(i)) S.multiSel.delete(i); else S.multiSel.add(i);
+      S.selAnchor = i;
+      syncFilmstrip();
+    } else {
+      S.selAnchor = i;
+      S.multiSel.clear();
+      S.idx = i;
+      syncSelectionFromCaption();
+      render();
+    }
+  }
+  function clearMultiSel() {
+    S.multiSel.clear(); S.selAnchor = null;
+    syncFilmstrip();
+  }
+  function updateBulkBar() {
+    const bar = $("bulkBar");
+    if (!bar) return;
+    const n = S.multiSel.size;
+    bar.hidden = n < 2;
+    if (n >= 2) $("bulkCount").textContent = `${n} photos selected —`;
+  }
+  // One action applied to every selected photo, with ONE undo covering the
+  // whole batch (the per-photo undos are chained under a single snapshot).
+  async function bulkApply(action) {
+    const targets = [...S.multiSel].sort((a, b) => a - b).map((i) => S.photos[i]).filter(Boolean);
+    if (targets.length < 2) return;
+    let caption = null, taxa = null, keywords = null;
+    if (action === "labelled") {
+      caption = $("captionBox").value.trim();
+      if (!caption) { toast("Type or pick a caption first — it will be applied to every selected photo.", "info", 5000); return; }
+      taxa = taxaFromCaption(caption);
+      keywords = keywordsForSave(taxa);
+    }
+    const verb = { labelled: "Label", skipped: "Skip", undetermined: "Mark undetermined", deleted: "Delete" }[action];
+    if (!confirm(`${verb} ${targets.length} photos${action === "labelled" ? ` as “${caption}”` : ""}? One Undo reverts the whole batch.`)) return;
+    const pre = {
+      photos: S.photos.map((q) => ({ ...q, fileHandle: null, url: null, _apBlob: null })),
+      idx: S.idx, lastCaption: S.lastCaption, recent: [...S.recent],
+    };
+    const undos = [];
+    let done = 0, failed = 0;
+    setBusy(`${verb}ing…`);
+    try {
+      for (const p of targets) {
+        try {
+          if (action === "labelled") {
+            if (S.mode === "applephotos") {
+              await applyStatus(p, "labelled", caption, null, taxa, keywords, null);
+            } else {
+              const origBytes = S.mode === "fs" ? await getFileBytes(p) : null;
+              const bytes = await composeSaveBytes(p, caption, keywords);
+              await applyStatus(p, "labelled", caption, bytes, taxa, keywords, origBytes);
+            }
+          } else if (action === "undetermined") {
+            let bytes = null, origBytes = null;
+            if (S.mode !== "applephotos") {
+              origBytes = S.mode === "fs" ? await getFileBytes(p) : null;
+              try { bytes = await composeSaveBytes(p, CFG.undeterminedCaption, []); } catch { /* move anyway */ }
+            }
+            await applyStatus(p, "undetermined", CFG.undeterminedCaption, bytes, null, [], origBytes);
+          } else {
+            await applyStatus(p, action, null, null, null);
+          }
+          if (S.undo && S.undo.fileUndo) undos.push(S.undo.fileUndo);
+          done++;
+        } catch (e) { console.warn("bulk action failed for", p.name, e); failed++; }
+        setBusy(`${verb}ing… ${done + failed}/${targets.length}`);
+      }
+    } finally { setBusy(null); }
+    S.undo = { ...pre, fileUndo: async () => {
+      for (const u of undos.reverse()) { try { await u(); } catch (e) { console.warn(e); } }
+    } };
+    clearMultiSel();
+    ensureVisible();
+    render();
+    toast(`${done} photo${done === 1 ? "" : "s"} updated${failed ? `, ${failed} failed` : ""}. One Undo reverts all of it.`, failed ? "warn" : "info", 6000);
+  }
+
+  // ---- CSV export ----------------------------------------------------------
+  function csvField(v) {
+    let s = v == null ? "" : String(v);
+    if (/^[=+\-@]/.test(s)) s = "'" + s;   // spreadsheet formula-injection guard
+    if (/[",\n;]/.test(s)) s = '"' + s.replace(/"/g, '""') + '"';
+    return s;
+  }
+  function exportCsv() {
+    if (!S.photos.length) { toast("Nothing to export — open a folder or connect to Photos first.", "info", 4500); return; }
+    const rows = [["filename", "status", "caption", "keywords", "date", "latitude", "longitude", "inaturalist"].join(",")];
+    for (const p of S.photos) {
+      rows.push([
+        csvField(p.name), csvField(p.status), csvField(p.caption),
+        csvField((p.keywords || []).join("; ")),
+        csvField(p.datetime ? fmtDate(p.datetime) : ""),
+        csvField(p.lat != null ? p.lat.toFixed(6) : ""),
+        csvField(p.lon != null ? p.lon.toFixed(6) : ""),
+        csvField(p.inatUrl || ""),
+      ].join(","));
+    }
+    // BOM so Excel opens it as UTF-8 without an import wizard.
+    const blob = new Blob(["﻿" + rows.join("\n")], { type: "text/csv;charset=utf-8" });
+    const a = el("a", { href: URL.createObjectURL(blob), download: `tagit-${fmtDay(new Date())}.csv` });
+    document.body.append(a); a.click();
+    setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 1000);
+    toast(`Exported ${S.photos.length} photo${S.photos.length === 1 ? "" : "s"} to CSV.`, "info", 4000);
   }
 
   // ---- the core actions ----------------------------------------------------
@@ -2400,6 +2667,7 @@
       $("statusCorner").textContent = ""; $("statusCorner").hidden = true;
       renderSuggestions(); renderRecent(); renderSelection();
       renderInat(); renderPhotoControls(); renderInatPhotoStage(); renderApproxLocationBox();
+      S._filmSig = null; rebuildFilmstrip();
       return;
     }
     // preview
@@ -2412,11 +2680,19 @@
       toast("Couldn't load this photo's image: " + (e.message || e), "warn", 8000);
     }
     // Photos-mode images come over HTTP one at a time — quietly warm up the
-    // next visible photo so advancing feels instant.
+    // next visible photo so advancing feels instant. And since each fetched
+    // image is cached as a blob, evict the ones far from the current photo,
+    // or a few hundred photos of browsing would quietly hold hundreds of MB.
     if (S.mode === "applephotos") {
       const after = visibleIdx().filter((i) => i > S.idx);
       const next = after.length ? S.photos[after[0]] : null;
       if (next && !next._apBlob) getFile(next).catch(() => {});
+      S.photos.forEach((q, i) => {
+        if (q._apBlob && Math.abs(i - S.idx) > 10) {
+          if (q.url) { URL.revokeObjectURL(q.url); q.url = null; }
+          q._apBlob = null;
+        }
+      });
     }
 
     // Everything about this photo overlays the bottom of the photo itself —
@@ -2445,7 +2721,7 @@
       $("meta").append(d);
     }
     if (p.lat != null && p.lon != null) $("meta").append(mapToggleRow());
-    else if (S.mode !== "applephotos") $("meta").append(estimateLocationRow());
+    else $("meta").append(estimateLocationRow());
     $("meta").hidden = !S.infoVisible;
 
     renderSuggestions(); renderRecent(); renderSelection();
@@ -2454,6 +2730,11 @@
     // this, saving/navigating inside the iNaturalist tab left the previous
     // photo's map showing even on photos that already have GPS.
     renderApproxLocationBox();
+    // Filmstrip: full rebuild only when the set of visible photos (or a
+    // status) actually changed; plain navigation just re-syncs highlights.
+    const filmSig = visibleIdx().map((i) => i + S.photos[i].status[0]).join("|");
+    if (filmSig !== S._filmSig) { S._filmSig = filmSig; rebuildFilmstrip(); }
+    else syncFilmstrip();
     if (!$("captionBox").value) updateCaptionBox();
   }
 
@@ -2475,6 +2756,7 @@
     const total = Math.max(S.photos.length, 1);
     const done = c.labelled + c.skipped + c.deleted;
     $("barDone").style.width = Math.round((100 * done) / total) + "%";
+    if ($("barPre")) $("barPre").style.width = Math.round((100 * c.preexisting) / total) + "%";
     $("barUndet").style.width = Math.round((100 * c.undetermined) / total) + "%";
     // "already tagged" only exists in Apple Photos mode — only mention it
     // when there actually are some, so the folder workflow's text is unchanged.
@@ -2783,6 +3065,7 @@
       if (e.key !== "Escape") return;
       if (!$("congratsOverlay").hidden) hideCongrats();
       if ($("inatCelebrate") && !$("inatCelebrate").hidden) { $("inatCelebrate").hidden = true; clearTimeout(inatCelebrateTimer); }
+      if (S.multiSel.size) clearMultiSel();
       closeAllModals();
     });
     $("prevBtn").onclick = goPrev;
@@ -2813,6 +3096,14 @@
     $("taxAddBtn").onclick = commitTaxonomyUpload;
     $("taxCancelBtn").onclick = cancelTaxonomyUpload;
     $("refreshKeywordsBtn").onclick = refreshAllKeywords;
+    if ($("exportCsvBtn")) $("exportCsvBtn").onclick = exportCsv;
+
+    // filmstrip bulk actions
+    if ($("bulkApplyBtn")) $("bulkApplyBtn").onclick = () => bulkApply("labelled");
+    if ($("bulkSkipBtn")) $("bulkSkipBtn").onclick = () => bulkApply("skipped");
+    if ($("bulkUndetBtn")) $("bulkUndetBtn").onclick = () => bulkApply("undetermined");
+    if ($("bulkDeleteBtn")) $("bulkDeleteBtn").onclick = () => bulkApply("deleted");
+    if ($("bulkClearBtn")) $("bulkClearBtn").onclick = clearMultiSel;
 
     // observation log
     $("obsFile").addEventListener("change", async (e) => {
@@ -2893,11 +3184,26 @@
       }
       return raw;
     };
+    // The token grants write access to the user's iNaturalist account for
+    // ~24h — where it's kept is their call. "Remember" = localStorage
+    // (survives browser restarts); off = sessionStorage (gone when the
+    // browser closes). Default is off for anyone who hasn't opted in.
+    const storeInatToken = () => {
+      if (S.inatTokenRemember) { LS.set("inatToken", S.inatToken); SS.del("inatToken"); }
+      else { SS.set("inatToken", S.inatToken); LS.del("inatToken"); }
+    };
+    if ($("inatRemember")) {
+      $("inatRemember").checked = !!S.inatTokenRemember;
+      $("inatRemember").addEventListener("change", (e) => {
+        S.inatTokenRemember = e.target.checked;
+        storeInatToken();
+      });
+    }
     $("inatToken").addEventListener("input", (e) => {
       const clean = normalizeInatToken(e.target.value);
       if (clean !== e.target.value) e.target.value = clean;
       S.inatToken = clean;
-      LS.set("inatToken", S.inatToken);
+      storeInatToken();
       updateInatStatus();
     });
     // Pasting a token is a complete gesture — verify it right away instead
@@ -2970,7 +3276,10 @@
     const obs = LS.get("obs", null);
     if (obs) { S.obs = obs.map((o) => ({ ...o, datetime: new Date(o.datetime) })); rebuildChoices(); $("obsStatus").textContent = `${S.obs.length} observations loaded (saved)`; }
     S.recent = LS.get("recent", []);
-    S.inatToken = LS.get("inatToken", "");
+    // Token: localStorage if the user opted into remembering, else the
+    // session-only copy. "Remember" state is inferred from where it lives.
+    S.inatToken = LS.get("inatToken", "") || SS.get("inatToken", "");
+    S.inatTokenRemember = !!LS.get("inatToken", "");
     S.mapVisible = LS.get("mapVisible", false);
     S.infoVisible = LS.get("infoVisible", true);
     S.watermark = LS.get("watermark", { enabled: false, text: "", position: "br", font: "sans", sizePct: 2.8 });

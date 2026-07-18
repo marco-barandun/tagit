@@ -490,11 +490,39 @@ select.input {
 /* progress */
 .progress { display: flex; height: 8px; margin: 14px 0 8px; border-radius: 999px; overflow: hidden; background: var(--hair); }
 .bar-done { height: 100%; width: 0; background: linear-gradient(90deg, var(--accent), var(--done)); transition: width .3s ease; }
+.bar-pre { height: 100%; width: 0; background: #3b7cc4; transition: width .3s ease; }
 .bar-undet { height: 100%; width: 0; background: var(--undet); transition: width .3s ease; }
 .progress-text { font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; }
 
 /* ---------- photo stage ---------- */
 .stage-col { min-width: 0; }
+
+/* ---------- filmstrip + bulk actions ---------- */
+.filmstrip {
+  display: flex; gap: 6px; overflow-x: auto; flex: none;
+  padding: 4px 2px 8px; margin-bottom: 6px; scrollbar-width: thin;
+}
+.film-cell {
+  position: relative; flex: 0 0 auto; width: 72px; height: 54px;
+  padding: 0; border: 2px solid var(--hair); border-radius: 8px;
+  overflow: hidden; cursor: pointer; background: var(--ground);
+}
+.film-cell img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.film-cell.multisel { border-color: #3b7cc4; }
+.film-cell.current { border-color: var(--accent-strong); }
+.film-cell:hover { filter: brightness(1.08); }
+.film-dot {
+  position: absolute; top: 3px; right: 3px; width: 10px; height: 10px;
+  border-radius: 50%; border: 1.5px solid rgba(0, 0, 0, 0.4);
+  background: transparent;
+}
+.bulk-bar {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap; flex: none;
+  padding: 8px 12px; margin-bottom: 8px;
+  background: var(--panel, var(--ground)); border: 1px solid #3b7cc4;
+  border-radius: var(--r-md); font-size: 13px;
+}
+#bulkCount { color: var(--muted); font-variant-numeric: tabular-nums; }
 .stage {
   position: relative; display: grid; place-items: center;
   min-height: 340px; padding: 20px; overflow: hidden;

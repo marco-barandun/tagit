@@ -52,6 +52,10 @@ final class MockPhotosProvider: PhotosProvider {
         return Self.renderJPEG(color: entry.color)
     }
 
+    func thumbnailData(for photoID: String) throws -> Data {
+        try imageData(for: photoID)   // demo images are tiny already
+    }
+
     func updateCaption(for photoID: String, caption: String, keywords: [String]) throws {
         lock.lock(); defer { lock.unlock() }
         guard let idx = entries.firstIndex(where: { $0.info.id == photoID }) else {
@@ -61,6 +65,18 @@ final class MockPhotosProvider: PhotosProvider {
         entries[idx].info = PhotoInfo(
             id: old.id, filename: old.filename, dateTaken: old.dateTaken,
             lat: old.lat, lon: old.lon, caption: caption, keywords: keywords
+        )
+    }
+
+    func updateLocation(for photoID: String, lat: Double, lon: Double) throws {
+        lock.lock(); defer { lock.unlock() }
+        guard let idx = entries.firstIndex(where: { $0.info.id == photoID }) else {
+            throw HelperError(message: "no such demo photo")
+        }
+        let old = entries[idx].info
+        entries[idx].info = PhotoInfo(
+            id: old.id, filename: old.filename, dateTaken: old.dateTaken,
+            lat: lat, lon: lon, caption: old.caption, keywords: old.keywords
         )
     }
 

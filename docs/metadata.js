@@ -237,10 +237,14 @@ const TagMeta = (() => {
   // same place a camera itself would put it, so any tool reading the file
   // (including this app's own reader) picks it up normally.
   function toDMSRational(absDeg) {
-    const d = Math.floor(absDeg);
+    let d = Math.floor(absDeg);
     const mFull = (absDeg - d) * 60;
-    const m = Math.floor(mFull);
-    const s = Math.round((mFull - m) * 60 * 10000);
+    let m = Math.floor(mFull);
+    let s = Math.round((mFull - m) * 60 * 10000);
+    // Rounding can push seconds up to exactly 60.0000" (or minutes to 60') —
+    // carry over instead of writing an out-of-range sexagesimal value.
+    if (s >= 600000) { s = 0; m += 1; }
+    if (m >= 60) { m = 0; d += 1; }
     return [[d, 1], [m, 1], [s, 10000]];
   }
   function writeGps(u8, lat, lon) {

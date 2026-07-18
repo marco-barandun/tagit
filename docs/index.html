@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>tagit — caption plant &amp; animal photos in your browser</title>
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Cpath d='M25 6C13 6 7 13 7 22c0 1 0 2 .3 3C10 18 16 14 22 12c-5 3-9 7-11 14 10 1 16-6 16-16 0-2 0-3-2-4z' fill='%232f6b47'/%3E%3C/svg%3E">
-  <link rel="stylesheet" href="styles.css?v=16">
+  <link rel="stylesheet" href="styles.css?v=17">
   <link rel="stylesheet" href="vendor/leaflet.css">
   <script>
     // Set theme before first paint to avoid a flash.
@@ -98,6 +98,7 @@
             <input type="password" id="inatToken" class="input" placeholder="Paste iNaturalist API token…" autocomplete="off">
             <button id="inatCheckBtn" class="btn btn-ghost">Check</button>
           </div>
+          <label class="check"><input type="checkbox" id="inatRemember"><span>Remember token on this computer — otherwise it's kept only until the browser closes</span></label>
         </div>
         <div class="inat-stage">
           <img id="inatPhotoImg" alt="Current photo">
@@ -209,7 +210,8 @@
       <div class="fold-sec-body">
         <div id="estimateLocationMap" class="estimate-location-map" role="img" aria-label="Estimated location, with the nearby photos it was based on"></div>
         <p id="estimateLocationExplain" class="hint"></p>
-        <div class="grid2">
+        <button type="button" id="estimateSnapBtn" class="btn full" hidden></button>
+        <div class="grid2" style="margin-top:8px">
           <button type="button" id="estimateLocationConfirmBtn" class="btn btn-primary">Use this location</button>
           <button type="button" id="estimateLocationCancelBtn" class="btn btn-ghost">Cancel</button>
         </div>
@@ -295,6 +297,9 @@
           </div>
         </div>
 
+        <button id="exportCsvBtn" class="btn btn-ghost full">Export photo list as CSV</button>
+        <p class="hint" style="margin:6px 0 10px">Filename, status, caption, keywords, date, GPS and iNaturalist link for every photo currently loaded — for spreadsheets or archives.</p>
+
         <button id="refreshKeywordsBtn" class="btn btn-ghost full">Refresh keywords for already-captioned photos</button>
         <p class="hint" style="margin:6px 0 0">Re-derives genus/species/family/attribute keywords from the taxonomies above for every photo in this folder that already has a caption — handy after editing a taxonomy or adding new attribute columns. Keywords you added by hand are kept; you'll see exactly what would change before anything is written.</p>
 
@@ -359,7 +364,8 @@
           <li>Save → <code>_labelled</code>; Skip → <code>_skipped</code>; Can’t determine → <code>_undetermined</code> (“Indet.”); Delete → <code>_deleted</code>.</li>
           <li>Full folder editing works in Chrome/Edge/Brave/Arc. Safari/Firefox: drag in and download copies.</li>
           <li>This build handles <strong>JPEG</strong> only — RAW/HEIC need the desktop version.</li>
-          <li><strong>Connect to Photos</strong> tags photos straight from your Apple Photos library via a small local helper app — captions/keywords are written with Photos' own scripting interface, so nothing is exported or re-imported. Rotate, watermark and estimated-location aren't available for these photos yet.</li>
+          <li><strong>Connect to Photos</strong> tags photos straight from your Apple Photos library via a small local helper app — captions/keywords are written with Photos' own scripting interface, so nothing is exported or re-imported. Rotate and watermark aren't available for these photos yet.</li>
+          <li><strong>Filmstrip</strong>: the thumbnail row above the photo jumps anywhere with a click; shift-click selects a range and Cmd/Ctrl-click toggles single photos for bulk actions (apply one caption, skip, delete — one Undo reverts the whole batch).</li>
           <li><strong>iNaturalist</strong>: paste a token in the iNaturalist tab, then click <em>Identify with iNaturalist</em> to get AI suggestions (with confidence %) for the current photo (uses its GPS &amp; date).</li>
           <li><strong>Map</strong>: photos with GPS get a <em>Show map</em> control in the photo info; it appears as a small preview in the photo's bottom-right corner — click it to enlarge.</li>
           <li>Keys: ← → navigate · 1–9 pick a suggestion · Delete discard (only with nothing selected). Just start typing a letter anywhere to jump into the search box — Rotate/Undo/Can’t-determine/Same-as-previous are one click away as buttons instead of shortcut letters, so a letter key always means “start a search.”</li>
@@ -463,13 +469,24 @@
      </div><!-- /.panel-scroll -->
 
       <div class="panel-foot">
-        <div class="progress"><div id="barDone" class="bar-done"></div><div id="barUndet" class="bar-undet"></div></div>
+        <div class="progress"><div id="barDone" class="bar-done"></div><div id="barPre" class="bar-pre"></div><div id="barUndet" class="bar-undet"></div></div>
         <div id="progressText" class="progress-text"></div>
       </div>
     </aside>
 
     <!-- ---------- photo stage ---------- -->
     <section class="stage-col">
+      <div id="bulkBar" class="bulk-bar" hidden>
+        <span id="bulkCount"></span>
+        <button id="bulkApplyBtn" class="btn">Apply caption to all</button>
+        <button id="bulkSkipBtn" class="btn">Skip</button>
+        <button id="bulkUndetBtn" class="btn">Can’t determine</button>
+        <button id="bulkDeleteBtn" class="btn btn-danger">Delete</button>
+        <button id="bulkClearBtn" class="btn btn-ghost">Clear</button>
+      </div>
+      <!-- Thumbnail strip: click to jump, shift-click to select a range,
+           Cmd/Ctrl-click to toggle one photo for bulk actions. -->
+      <div id="filmstrip" class="filmstrip" hidden></div>
       <div class="stage">
         <div id="busy" class="busy" style="display:none"></div>
         <img id="photo" src="" alt="current photo">
@@ -497,8 +514,8 @@
     </section>
   </main>
 
-  <script src="metadata.js?v=12"></script>
-  <script src="app.js?v=18"></script>
+  <script src="metadata.js?v=13"></script>
+  <script src="app.js?v=20"></script>
   <script>
     (() => {
       const root = document.documentElement;

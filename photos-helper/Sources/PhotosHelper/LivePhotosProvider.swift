@@ -1,6 +1,7 @@
 import Foundation
 import AppKit
 import Photos
+import CoreLocation
 import CoreGraphics
 import ImageIO
 import UniformTypeIdentifiers
@@ -196,6 +197,40 @@ final class LivePhotosProvider: PhotosProvider {
     func updateCaption(for photoID: String, caption: String, keywords: [String]) throws {
         _ = try asset(photoID)  // confirms it's actually one of ours before touching anything
         try PhotosScripting.setCaptionAndKeywords(id: photoID, caption: caption, keywords: keywords)
+    }
+
+    /// Small filmstrip preview — from the local thumbnail cache only, so a
+    /// whole strip of them never queues iCloud downloads.
+    func thumbnailData(for photoID: String) throws -> Data {
+        let a = try asset(photoID)
+        let options = PHImageRequestOptions()
+        options.isSynchronous = true
+        options.deliveryMode = .fastFormat
+        options.isNetworkAccessAllowed = false
+        options.resizeMode = .fast
+        var result: Data?
+        imageManager.requestImage(
+            for: a, targetSize: CGSize(width: 240, height: 240), contentMode: .aspectFill, options: options
+        ) { image, _ in result = image.flatMap { Self.jpegData(from: $0) } }
+        guard let result else { throw HelperError(message: "no local thumbnail available") }
+        return result
+    }
+
+    /// The one asset property PhotosKit's change API genuinely supports that
+    /// tagit needs: writing GPS onto a photo that has none (the "estimate
+    /// location" feature). Scoped like everything else — only assets from
+    /// the chosen album ever pass the `asset(_:)` lookup.
+    func updateLocation(for photoID: String, lat: Double, lon: Double) throws {
+        let a = try asset(photoID)
+        var changeError: Error?
+        do {
+            try PHPhotoLibrary.shared().performChangesAndWait {
+                PHAssetChangeRequest(for: a).location = CLLocation(latitude: lat, longitude: lon)
+            }
+        } catch { changeError = error }
+        if let changeError {
+            throw HelperError(message: "could not write the location: \(changeError.localizedDescription)")
+        }
     }
 
     static func jpegData(from image: NSImage) -> Data? {

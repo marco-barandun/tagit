@@ -58,6 +58,7 @@ final class HTTPServer {
             case 401: return "Unauthorized"
             case 403: return "Forbidden"
             case 404: return "Not Found"
+            case 413: return "Payload Too Large"
             case 500: return "Internal Server Error"
             default: return "OK"
             }
@@ -119,6 +120,12 @@ final class HTTPServer {
         }
     }
 
+    // Loopback-only doesn't mean trusted: any local process can open a
+    // connection, so never buffer unbounded data on its behalf. Real tagit
+    // requests are a few KB of headers and small JSON bodies.
+    private static let maxHeaderBytes = 64 * 1024
+    private static let maxBodyBytes = 8 * 1024 * 1024
+
     private func receiveRequest(on connection: NWConnection, buffer: Data) {
         connection.receive(minimumIncompleteLength: 1, maximumLength: 65536) { [weak self] data, _, isComplete, error in
             guard let self else { return }
@@ -127,6 +134,10 @@ final class HTTPServer {
 
             if let headerEnd = Self.range(of: "\r\n\r\n", in: buffer) {
                 self.handleFullHeaders(connection: connection, buffer: buffer, headerEnd: headerEnd)
+                return
+            }
+            if buffer.count > Self.maxHeaderBytes {
+                connection.cancel()
                 return
             }
             if isComplete || error != nil {
@@ -157,6 +168,10 @@ final class HTTPServer {
 
         let bodyStart = headerEnd.upperBound
         let contentLength = Int(headers["content-length"] ?? "0") ?? 0
+        guard contentLength >= 0, contentLength <= Self.maxBodyBytes else {
+            self.reject(connection, 413, "request body too large")
+            return
+        }
         let alreadyHave = buffer.count - buffer.distance(from: buffer.startIndex, to: bodyStart)
         if alreadyHave < contentLength {
             self.receiveBody(connection: connection, buffer: buffer, bodyStart: bodyStart,

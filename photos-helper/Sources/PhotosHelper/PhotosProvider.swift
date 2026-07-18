@@ -14,5 +14,11 @@ protocol PhotosProvider {
 
     func listPhotos() throws -> [PhotoInfo]
     func imageData(for photoID: String) throws -> Data
+    /// Small (~240px) preview for the filmstrip — cheap to produce, never
+    /// waits on iCloud.
+    func thumbnailData(for photoID: String) throws -> Data
     func updateCaption(for photoID: String, caption: String, keywords: [String]) throws
+    /// Writes real GPS coordinates onto the photo (the "estimate location"
+    /// feature) — the one field PhotosKit's change API does support.
+    func updateLocation(for photoID: String, lat: Double, lon: Double) throws
 }
