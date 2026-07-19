@@ -142,9 +142,33 @@
     for (const [k, v] of S.backbone) if (k.toLowerCase() === lower) return v;
     return "";
   }
+  // Trailing qualifiers that usually aren't their own taxonomy row, even
+  // though the base binomial is — "Taraxacum officinale aggr." should still
+  // find "Taraxacum officinale"'s family, not come up empty.
+  const TAXON_QUALIFIER_RE = /\s+(?:aggr\.?|agg\.?|s\.\s*l\.?|s\.\s*str\.?|sp\.?|spp\.?)$/i;
+  function stripTaxonQualifiers(taxon) {
+    let t = (taxon || "").trim(), prev;
+    do { prev = t; t = t.replace(TAXON_QUALIFIER_RE, "").trim(); } while (t !== prev);
+    return t;
+  }
   function familyFor(taxon) {
-    const f = lookupFamily(taxon);
-    return f || S.sessionFamilies.get(taxon) || "";
+    let f = lookupFamily(taxon) || S.sessionFamilies.get(taxon);
+    if (f) return f;
+    const base = stripTaxonQualifiers(taxon);
+    if (base && base !== taxon) {
+      f = lookupFamily(base) || S.sessionFamilies.get(base);
+      if (f) return f;
+    }
+    // A bare genus (no species) — every species in a genus shares its
+    // family, so borrow it from any known species in that genus rather than
+    // leaving a genus-level determination family-less.
+    if (taxon && !taxon.includes(" ")) {
+      const genusLower = taxon.toLowerCase();
+      for (const [k, v] of S.backbone) {
+        if (v && k.toLowerCase().split(/\s+/)[0] === genusLower) return v;
+      }
+    }
+    return "";
   }
   function applyCf(taxon) {
     const parts = taxon.split(" ");
@@ -167,10 +191,20 @@
       return composeCaption(name, fam);
     }).filter(Boolean).join(", ");
   }
-  function attrsOf(taxon) { return S.taxAttrs.get(taxon) || {}; }
+  function attrsOf(taxon) {
+    const direct = S.taxAttrs.get(taxon);
+    if (direct) return direct;
+    const base = stripTaxonQualifiers(taxon);
+    if (base && base !== taxon) {
+      const viaBase = S.taxAttrs.get(base);
+      if (viaBase) return viaBase;
+    }
+    return {};
+  }
 
-  // Build the keyword set for a set of taxa: genus, full name (species), family
-  // and any taxonomy attributes (e.g. "invasive"), all deduplicated. The caption
+  // Build the keyword set for a set of taxa: full name (species), genus,
+  // family, then any taxonomy attributes (e.g. "invasive") — always in that
+  // order, so the keyword list reads the same way every time. The caption
   // itself never carries attributes — only these keywords do.
   const BOOL_TRUE = /^(yes|true|1|x|y|ja|wahr|si|oui)$/i;
   function autoKeywords(taxa) {
@@ -182,8 +216,8 @@
     for (const t of taxa) {
       if (!t) continue;
       const clean = t.replace(/\s+cf\.\s+/i, " ").trim();     // keywords ignore the cf. marker
-      push(clean.split(/\s+/)[0]);                            // genus
       push(clean);                                            // full name (species)
+      push(clean.split(/\s+/)[0]);                            // genus
       let fam = familyFor(t);
       if (!fam && $("familyBox")) fam = $("familyBox").value.trim();
       if (fam) push(fam);                                     // family
@@ -218,11 +252,36 @@
     }
     return kws;
   }
-  // Setup & tools: "Refresh keywords for already-captioned photos" — re-derive
-  // genus/species/family/attribute keywords from the current taxonomy for
-  // every photo that already has a real caption (skips "Indet." — there's no
-  // taxon to derive anything from), previewing the change count before
-  // writing anything.
+  // Recompose a photo's caption from its own taxa against the CURRENT
+  // taxonomy — used by the refresh below to fix captions that are missing a
+  // family (e.g. it was added to the taxonomy, or a qualifier like "aggr."
+  // meant the family lookup used to come up empty) without depending on any
+  // single-photo UI state (S.cf, the family box) the way composeForTaxa does.
+  // If a taxon still has no family match anywhere, whatever family was
+  // already in that segment of the caption is kept as-is — a hand-typed
+  // family with no taxonomy backing is never silently erased.
+  function recomposeCaption(p, taxa) {
+    const hasCf = /(^|\s)cf\.(\s|$)/i.test(p.caption || "");
+    const existingParts = (p.caption || "").split(",").map((s) => s.trim());
+    return taxa.map((t, i) => {
+      let fam = familyFor(t);
+      if (!fam) {
+        const m = (existingParts[i] || "").match(/\(([^()]+)\)\s*$/);
+        if (m) fam = m[1];
+      }
+      const name = hasCf ? applyCf(t) : t;
+      return composeCaption(name, fam);
+    }).filter(Boolean).join(", ");
+  }
+  // Setup & tools: "Refresh captions & keywords for already-captioned
+  // photos" — re-derive genus/species/family/attribute keywords AND the
+  // caption's family suffix from the current taxonomy for every photo that
+  // already has a real caption (skips "Indet." — there's no taxon to derive
+  // anything from). Catches taxa whose family lookup used to fail — a
+  // qualifier like "Taraxacum officinale aggr.", or a bare genus like
+  // "Centaurea" — since familyFor()/attrsOf() now fall back to the base
+  // binomial and, for a bare genus, to any species in that genus. Previews
+  // the change count before writing anything.
   async function refreshAllKeywords() {
     const candidates = S.photos.filter((p) => p.caption && p.caption !== CFG.undeterminedCaption);
     if (!candidates.length) { toast("No captioned photos here to check.", "info", 4500); return; }
@@ -231,25 +290,40 @@
       const taxa = taxaFromCaption(p.caption);
       if (!taxa.length) continue;
       const next = recomputedKeywordsFor(p, taxa);
+      const nextCaption = recomposeCaption(p, taxa);
       const norm = (arr) => arr.map((k) => k.toLowerCase()).sort().join("|");
-      if (norm(p.keywords || []) !== norm(next)) updates.push({ p, next });
+      const keywordsChanged = norm(p.keywords || []) !== norm(next);
+      const captionChanged = nextCaption && nextCaption !== p.caption;
+      if (keywordsChanged || captionChanged) updates.push({ p, next, nextCaption, captionChanged, keywordsChanged });
     }
-    if (!updates.length) { toast(`Checked ${candidates.length} captioned photo(s) — keywords are already up to date.`, "info", 6000); return; }
-    const preview = updates.slice(0, 8).map((u) => `• ${u.p.name}`).join("\n");
+    if (!updates.length) { toast(`Checked ${candidates.length} captioned photo(s) — captions and keywords are already up to date.`, "info", 6000); return; }
+    const preview = updates.slice(0, 8).map((u) => `• ${u.p.name}` + (u.captionChanged ? ` → “${u.nextCaption}”` : "")).join("\n");
     const more = updates.length > 8 ? `\n…and ${updates.length - 8} more` : "";
-    if (!confirm(`Update keywords on ${updates.length} of ${candidates.length} captioned photo(s), based on the current taxonomy?\n${preview}${more}`)) return;
-    setBusy("Updating keywords…");
+    const captionCount = updates.filter((u) => u.captionChanged).length;
+    if (!confirm(`Update ${updates.length} of ${candidates.length} captioned photo(s) — keywords` +
+      (captionCount ? `, and ${captionCount} caption(s) (e.g. a forgotten family)` : "") +
+      ` — based on the current taxonomy?\n${preview}${more}`)) return;
+    openSyncOverlay("Syncing keywords…");
+    setBusy("Updating captions & keywords…");
     let n = 0;
+    const results = [];
     try {
-      for (const { p, next } of updates) {
+      for (const { p, next, nextCaption, captionChanged, keywordsChanged } of updates) {
         try {
-          await writeCaptionKeywords(p, p.caption, next, p.inatUrl);
-          p.keywords = next; p.url = null;
+          await writeCaptionKeywords(p, nextCaption, next, p.inatUrl);
+          p.caption = nextCaption; p.keywords = next; p.url = null;
           n++;
-        } catch (e) { console.warn("keyword refresh failed for", p.name, e); }
+          const parts = [];
+          if (captionChanged) parts.push(`caption → “${nextCaption}”`);
+          if (keywordsChanged) parts.push("keywords updated");
+          results.push({ title: p.name, detail: parts.join(" · ") });
+        } catch (e) { console.warn("caption/keyword refresh failed for", p.name, e); }
       }
       render();
-      toast(`Updated keywords on ${n} of ${updates.length} photo(s).`, "info", 6000);
+      finishSyncOverlay("Done!", `Updated ${n} of ${updates.length} photo${updates.length === 1 ? "" : "s"}.`, results);
+    } catch (e) {
+      console.error(e); toast("Refreshing captions & keywords failed: " + (e.message || e) + ".", "warn", 9000);
+      if (!$("syncOverlay").hidden) closeSyncOverlay();   // don't leave the busy spinner stuck open on failure
     } finally { setBusy(null); }
   }
   function taxaFromCaption(caption) {
@@ -745,7 +819,12 @@
     const p = current(); if (!p) return;
     const token = requireInatToken();
     if (!token) return;
-    const taxa = S.selected.length ? S.selected : taxaFromCaption(p.caption);
+    // Prefer whatever's actually selected or typed right now — S.selected,
+    // then the live caption box (which may hold hand-typed text that was
+    // never saved) — over the photo's last-saved caption, so identifying
+    // uses the taxon the user is looking at, not a stale one.
+    const liveCaption = ($("captionBox") && $("captionBox").value.trim()) || "";
+    const taxa = S.selected.length ? S.selected : taxaFromCaption(liveCaption || p.caption);
     const name = (taxa[0] || "").trim();
     if (!name) { toast("Pick a taxon for this photo first.", "warn"); return; }
     if (p.inatUrl && !confirm("This photo is already linked to an observation. Create another?")) return;
@@ -803,9 +882,18 @@
       // wipe the caption while still creating a real iNaturalist observation.
       const caption = composeForTaxa(taxa) || p.caption || "";
       const keywords = keywordsForSave(taxa);
-      await writeCaptionKeywords(p, caption, keywords, url);
-      p.inatUrl = url;                                       // link it into the photo's metadata
-      p.caption = caption; p.keywords = keywords;
+      // Route through applyStatus (same as a normal save) so a successful
+      // iNaturalist post also marks the photo "labelled" — posting to iNat
+      // IS an identification, it shouldn't leave the photo looking untouched
+      // — and picks up undo for free. inatUrl is passed through rather than
+      // set on p directly, so undo correctly restores the old (or absent) link.
+      if (S.mode === "applephotos") {
+        await applyStatus(p, "labelled", caption, null, taxa, keywords, null, url);
+      } else {
+        const origBytes = S.mode === "fs" ? await getFileBytes(p) : null;
+        const bytes = await composeSaveBytes(p, caption, keywords, url);
+        await applyStatus(p, "labelled", caption, bytes, taxa, keywords, origBytes, url);
+      }
       render();
       showInatCelebration(url);
     } catch (e) {
@@ -817,9 +905,8 @@
   // (shift-click a range, Cmd/Ctrl-click to toggle) feeds this — one
   // observation, every selected photo attached to it as an
   // observation_photo, same as picking "add more photos" by hand on
-  // iNaturalist's own site. Status is left untouched, matching the
-  // single-photo flow (that one doesn't mark "labelled" either — only the
-  // caption/keywords/link change).
+  // iNaturalist's own site. Every photo in the group is marked "labelled",
+  // same as the single-photo flow, with one combined Undo for the batch.
   async function inatCreateObservationFromSelection() {
     const targets = [...S.multiSel].sort((a, b) => a - b).map((i) => S.photos[i]).filter(Boolean);
     if (targets.length < 2) return;
@@ -875,6 +962,14 @@
 
       const caption = composeForTaxa(taxa) || name;
       const keywords = keywordsForSave(taxa);
+      // Same combined-undo pattern as bulkApply(): snapshot before the loop,
+      // collect each photo's fileUndo, then set one S.undo that reverts the
+      // whole batch instead of leaving Undo only cover the last photo.
+      const pre = {
+        photos: S.photos.map((q) => ({ ...q, fileHandle: null, url: null, _apBlob: null })),
+        idx: S.idx, lastCaption: S.lastCaption, recent: [...S.recent],
+      };
+      const undos = [];
       let uploaded = 0;
       for (const p of targets) {
         try {
@@ -887,10 +982,19 @@
           uploaded++;
         } catch (e) { console.warn("photo upload to iNaturalist failed for", p.name, e); }
         try {
-          await writeCaptionKeywords(p, caption, keywords, url);
-          p.inatUrl = url; p.caption = caption; p.keywords = keywords;
+          if (S.mode === "applephotos") {
+            await applyStatus(p, "labelled", caption, null, taxa, keywords, null, url);
+          } else {
+            const origBytes = S.mode === "fs" ? await getFileBytes(p) : null;
+            const bytes = await composeSaveBytes(p, caption, keywords, url);
+            await applyStatus(p, "labelled", caption, bytes, taxa, keywords, origBytes, url);
+          }
+          if (S.undo && S.undo.fileUndo) undos.push(S.undo.fileUndo);
         } catch (e) { console.warn("local metadata write failed for", p.name, e); }
       }
+      S.undo = { ...pre, fileUndo: async () => {
+        for (const u of undos.reverse()) { try { await u(); } catch (e) { console.warn(e); } }
+      } };
       clearMultiSel();
       render();
       showInatCelebration(url);
@@ -912,6 +1016,44 @@
     box.hidden = false;
     clearTimeout(inatCelebrateTimer);
     inatCelebrateTimer = setTimeout(() => { box.hidden = true; }, 6000);
+  }
+
+  // Shared "busy → done" popup for bulk operations (refreshing keywords,
+  // checking iNaturalist for taxonomic updates) — shows a spinner while the
+  // work runs, then a checkmark with a quick per-photo overview instead of
+  // just a one-line toast, so results aren't lost the moment they appear.
+  function openSyncOverlay(title) {
+    closeAllModals();
+    $("syncOverlayTitle").textContent = title;
+    $("syncOverlaySub").textContent = "";
+    $("syncOverlaySpinner").hidden = false;
+    $("syncOverlayBadge").hidden = true;
+    $("syncOverlayList").hidden = true;
+    $("syncOverlayList").innerHTML = "";
+    $("syncOverlayCloseBtn").hidden = true;
+    $("syncOverlay").hidden = false;
+  }
+  function closeSyncOverlay() { $("syncOverlay").hidden = true; }
+  // items: [{title, detail}] — detail is optional (e.g. "→ new caption").
+  function finishSyncOverlay(title, subtitle, items) {
+    $("syncOverlayTitle").textContent = title;
+    $("syncOverlaySub").textContent = subtitle || "";
+    $("syncOverlaySpinner").hidden = true;
+    $("syncOverlayBadge").hidden = false;
+    const box = $("syncOverlayList");
+    box.innerHTML = "";
+    if (items && items.length) {
+      for (const it of items) {
+        box.append(el("div", { className: "sync-item" }, [
+          el("div", { className: "sync-item-title", textContent: it.title }),
+          ...(it.detail ? [el("div", { className: "sync-item-detail", textContent: it.detail })] : []),
+        ]));
+      }
+    } else {
+      box.append(el("div", { className: "sync-list-empty", textContent: "Nothing needed updating." }));
+    }
+    box.hidden = false;
+    $("syncOverlayCloseBtn").hidden = false;
   }
 
   // Check every linked photo: if its observation is research grade with a
@@ -942,18 +1084,23 @@
       if (!updates.length) { toast(`Checked ${ids.length} observation(s) — no captions need updating.`, "info", 6000); return; }
       const list = updates.slice(0, 6).map((u) => `• ${u.p.name}: ${u.taxon}`).join("\n");
       if (!confirm(`${updates.length} research-grade observation(s) differ from your caption:\n${list}\n\nUpdate the photo captions to iNaturalist's ID?`)) return;
+      openSyncOverlay("Updating captions…");
       let n = 0;
+      const results = [];
       for (const { p, taxon } of updates) {
+        const prevCaption = p.caption || "(no caption)";
         const caption = composeCaption(taxon, familyFor(taxon));
         const keywords = autoKeywords([taxon]);
         await writeCaptionKeywords(p, caption, keywords, p.inatUrl);
         p.caption = caption; p.keywords = keywords;
         n++;
+        results.push({ title: p.name, detail: `${prevCaption} → ${caption}` });
       }
       render();
-      toast(`Updated ${n} caption(s) from iNaturalist.`, "info", 6000);
+      finishSyncOverlay("Done!", `${n} of ${ids.length} observation(s) had a newer, research-grade ID.`, results);
     } catch (e) {
       console.error(e); toast("iNaturalist sync failed: " + (e.message || e) + ".", "warn", 9000);
+      if (!$("syncOverlay").hidden) closeSyncOverlay();   // don't leave the busy spinner stuck open on failure
     } finally { setBusy(null); }
   }
 
@@ -1930,11 +2077,11 @@
 
   // Write caption/keywords/status to the helper and return an undo() closure —
   // the applephotos counterpart to commit() (which only handles fs/download).
-  async function commitApplePhotos(p, status, caption, keywords) {
+  async function commitApplePhotos(p, status, caption, keywords, inatUrl = p.inatUrl) {
     const prev = { caption: p.caption, keywords: p.keywords.slice(), status: p.status, inatUrl: p.inatUrl };
     const nextCaption = caption != null ? caption : p.caption;
     const nextKeywords = keywords != null ? keywords : p.keywords;
-    const wire = withReservedKeywords(nextKeywords, status, p.inatUrl);
+    const wire = withReservedKeywords(nextKeywords, status, inatUrl);
     await apFetch(`/photos/${encodeURIComponent(p.assetId)}/caption`, {
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ caption: nextCaption, keywords: wire }),
@@ -2627,9 +2774,14 @@
 
   // Shared move+record: write optional bytes, move to `status`, snapshot for undo.
   // origBytes (fs mode only) restores the file's original metadata on undo.
-  async function applyStatus(p, status, caption, bytes, taxa, keywords, origBytes) {
+  // inatUrl is optional — pass it only when this save should also (re)link
+  // the photo to an iNaturalist observation (e.g. just-posted). Left
+  // undefined, the existing link (if any) is untouched. It's a separate
+  // parameter rather than mutating p.inatUrl beforehand, so the `before`
+  // snapshot below still captures the OLD link for undo.
+  async function applyStatus(p, status, caption, bytes, taxa, keywords, origBytes, inatUrl) {
     const before = { ...p };
-    const res = S.mode === "applephotos" ? await commitApplePhotos(p, status, caption, keywords) : await commit(p, bytes, status, taxa);
+    const res = S.mode === "applephotos" ? await commitApplePhotos(p, status, caption, keywords, inatUrl) : await commit(p, bytes, status, taxa);
     let fileUndo = res.undo;
     if (origBytes && S.mode === "fs") {
       const baseUndo = res.undo;
@@ -2643,17 +2795,20 @@
     Object.assign(S.undo.photos[S.photos.indexOf(p)], before, { fileHandle: null, url: null });
     if (caption != null) { p.caption = caption; S.lastCaption = caption; }
     if (keywords != null) p.keywords = keywords;
+    if (inatUrl !== undefined) p.inatUrl = inatUrl;
     p.status = status;
     if (taxa) { rememberFamilies(taxa); noteRecent(taxa); }
   }
 
   // Assemble the bytes to write: original (optionally watermarked) + caption,
-  // keywords and any existing iNaturalist link.
-  async function composeSaveBytes(p, caption, keywords) {
+  // keywords and any existing iNaturalist link. inatUrl defaults to the
+  // photo's current link but can be overridden (e.g. a link just created)
+  // without mutating p.inatUrl ahead of the write — see applyStatus above.
+  async function composeSaveBytes(p, caption, keywords, inatUrl = p.inatUrl) {
     let bytes = await getFileBytes(p);
     if (S.watermark.enabled && S.watermark.text.trim())
       bytes = await applyWatermark(bytes, S.watermark.text.trim(), p.orientation, S.watermark);
-    return TagMeta.writeCaption(bytes, caption, keywords, p.inatUrl || "");
+    return TagMeta.writeCaption(bytes, caption, keywords, inatUrl || "");
   }
 
   // Burn a text watermark into the image at the chosen corner, font and size,
@@ -3243,6 +3398,10 @@
       if (e.target.id === "inatCelebrate") { $("inatCelebrate").hidden = true; clearTimeout(inatCelebrateTimer); }
     });
 
+    // sync overlay (refresh keywords / check iNaturalist for updates)
+    $("syncOverlayCloseBtn").onclick = closeSyncOverlay;
+    $("syncOverlay").addEventListener("click", (e) => { if (e.target.id === "syncOverlay" && !$("syncOverlayCloseBtn").hidden) closeSyncOverlay(); });
+
     // iNaturalist / Navigate & act: full-height modals opened from a slim row
     $("inatModalBtn").onclick = () => { openModal("inatModal"); renderInatPhotoStage(); renderApproxLocationBox(); };
     $("navModalBtn").onclick = () => openModal("navModal");
@@ -3290,6 +3449,7 @@
       if (e.key !== "Escape") return;
       if (!$("congratsOverlay").hidden) hideCongrats();
       if ($("inatCelebrate") && !$("inatCelebrate").hidden) { $("inatCelebrate").hidden = true; clearTimeout(inatCelebrateTimer); }
+      if (!$("syncOverlay").hidden && !$("syncOverlayCloseBtn").hidden) closeSyncOverlay();
       if (S.multiSel.size) clearMultiSel();
       closeAllModals();
     });

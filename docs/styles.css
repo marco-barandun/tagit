@@ -760,6 +760,30 @@ select.input {
 .congrats-label { font-size: 11px; color: var(--muted); margin-top: 3px; letter-spacing: 0.01em; }
 @keyframes congrats-in { from { opacity: 0; transform: scale(.94) translateY(6px); } to { opacity: 1; transform: none; } }
 
+/* ---------- sync overlay (busy → done, for bulk keyword/iNat operations) ---------- */
+.sync-spinner {
+  width: 40px; height: 40px; margin: 0 auto 18px;
+  border-radius: 50%; border: 3px solid var(--hair-strong);
+  border-top-color: var(--accent-strong);
+  animation: sync-spin .8s linear infinite;
+}
+.sync-spinner[hidden] { display: none; }
+@keyframes sync-spin { to { transform: rotate(360deg); } }
+.sync-list {
+  max-height: 40vh; overflow-y: auto; text-align: left;
+  margin: 0 0 18px; border-radius: var(--r-md);
+  background: var(--ground); border: 1px solid var(--hair);
+}
+.sync-list[hidden] { display: none; }
+.sync-list-empty { padding: 14px; text-align: center; color: var(--muted); font-size: 13px; }
+.sync-item {
+  padding: 9px 12px; font-size: 13px; line-height: 1.45;
+  display: flex; flex-direction: column; gap: 2px;
+}
+.sync-item + .sync-item { border-top: 1px solid var(--hair); }
+.sync-item-title { font-weight: 600; }
+.sync-item-detail { color: var(--muted); font-size: 12.5px; }
+
 /* Caption line on the photo overlay is clickable — load it into the caption box. */
 .meta-caption-row { cursor: pointer; border-radius: 4px; }
 .meta-caption-row:hover { text-decoration: underline; text-decoration-style: dotted; }
