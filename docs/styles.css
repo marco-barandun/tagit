@@ -490,8 +490,7 @@ select.input {
 /* progress */
 .progress { display: flex; height: 8px; margin: 14px 0 8px; border-radius: 999px; overflow: hidden; background: var(--hair); }
 .bar-done { height: 100%; width: 0; background: linear-gradient(90deg, var(--accent), var(--done)); transition: width .3s ease; }
-.bar-pre { height: 100%; width: 0; background: #3b7cc4; transition: width .3s ease; }
-.bar-undet { height: 100%; width: 0; background: var(--undet); transition: width .3s ease; }
+.bar-nontaxa { height: 100%; width: 0; background: var(--undet); transition: width .3s ease; }
 .progress-text { font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; }
 
 /* ---------- photo stage ---------- */

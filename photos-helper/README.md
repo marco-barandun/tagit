@@ -92,18 +92,19 @@ never touches Photos or asks for any permission at all.
 Because the helper never rewrites the image's pixel data, two byte-level
 features from the folder-based workflow aren't available for Photos library
 images: **Rotate** and the **watermark**. Everything else — determination,
-captions, keywords, star ratings, skip/undetermined/delete, undo,
-estimated-location (PhotosKit does support writing GPS), iNaturalist
-identify/create/sync (including grouping several photos into one
+captions, keywords, characteristic tags, star ratings, marking as non-taxon,
+delete, undo, estimated-location (PhotosKit does support writing GPS),
+iNaturalist identify/create/sync (including grouping several photos into one
 observation), and the already-posted-photo screener — works the same as the
 folder workflow.
 
-Status (labelled/skipped/undetermined/deleted) has no folder to move photos
+Status (untouched/tagged/deleted/non-taxon) has no folder to move photos
 into in Photos, so it's tracked with a hidden keyword instead (e.g.
-`tagit:labelled`) that's written alongside your real keywords and stripped
-back out before anything is shown to you. Star ratings, by contrast, are a
-normal, visible keyword (`★★★★★`, one per photo) — searchable in Photos
-itself; rating a photo 5 stars also sets Photos' native favorite.
+`tagit:tagged`) that's written alongside your real keywords and stripped
+back out before anything is shown to you. Star ratings and characteristic
+tags (Dormant, Flowering, Fruiting, Detail, Habitat), by contrast, are
+normal, visible keywords — searchable in Photos itself; rating a photo 5
+stars also sets Photos' native favorite.
 
 Loading a big album is fast: the initial photo list comes from PhotosKit
 alone (no AppleScript), and captions/keywords — the slow part, since they go

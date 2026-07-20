@@ -19,18 +19,23 @@
     cameraClockOffsetHours: 0,
     maxSuggestions: 10,
     maxRecent: 6,
-    labelledDir: "_labelled",
-    skippedDir: "_skipped",
-    undeterminedDir: "_undetermined",
+    taggedDir: "_tagged",
+    nontaxaDir: "_nontaxa",
     deletedDir: "_deleted",
-    undeterminedCaption: "Indet.",
+    nontaxaCaption: "Indet.",
   };
   const IMAGE_RE = /\.(jpe?g)$/i;                 // browser build handles JPEG only
   const STATUS_DIRS = {
-    labelled: CFG.labelledDir, skipped: CFG.skippedDir,
-    undetermined: CFG.undeterminedDir, deleted: CFG.deletedDir,
+    tagged: CFG.taggedDir, nontaxa: CFG.nontaxaDir, deleted: CFG.deletedDir,
   };
-  const SUBDIR_NAMES = Object.values(STATUS_DIRS);
+  // Folder names from before the untouched/tagged/deleted/nontaxa cleanup —
+  // recognized on scan so nothing already sorted this way is orphaned, and
+  // physically moved into the current folder the next time it's touched (see
+  // refreshAllKeywords). "_skipped" isn't listed: that status was retired
+  // outright, so anything in it is just treated as untouched (still to do).
+  const LEGACY_STATUS_DIRS = { tagged: "_labelled", nontaxa: "_undetermined" };
+  const LEGACY_SKIPPED_DIR = "_skipped";
+  const SUBDIR_NAMES = [...Object.values(STATUS_DIRS), ...Object.values(LEGACY_STATUS_DIRS), LEGACY_SKIPPED_DIR];
 
   // ---- state ---------------------------------------------------------------
   const S = {
@@ -42,6 +47,7 @@
     idx: 0,
     selected: [],          // chosen taxa (chips)
     cf: false,
+    charTags: new Set(),   // characteristics checked for the current photo (Dormant, Flowering, …)
     recent: [],
     lastCaption: "",
     undo: null,
@@ -51,22 +57,31 @@
     taxonomies: [],        // registry: [{id, name, source, file?}]
     activeTaxonomies: new Set(),   // ids of taxonomies in use (several at once)
     taxonomyCache: new Map(),      // id -> records[] {taxon, family, attrs}
+    availableAttrCols: [], // attribute column names seen across active taxonomies (e.g. "order", "invasive")
+    disabledAttrCols: new Set(),   // attribute columns the user opted out of as keywords
     obs: [],               // [{species, datetime:Date, locality}]
     sessionFamilies: new Map(),
-    statusFilter: new Set(["untouched", "preexisting", "labelled", "skipped", "undetermined", "deleted"]),
+    statusFilter: new Set(["untouched", "tagged", "deleted", "nontaxa"]),
     multiSel: new Set(),   // filmstrip multi-selection (photo indices)
     selAnchor: null,       // anchor index for shift-click ranges
     metaToken: 0,          // invalidates in-flight background metadata reads on reload
+    warmToken: 0,          // invalidates in-flight background image preloading on reload
     inatToken: "",         // iNaturalist API token (browser-only)
     inatResults: [],       // last CV suggestions
     inatResultsFor: null,  // photo the CV suggestions belong to
     infoVisible: true,     // photo-info panel (map/date/time/caption/keywords) toggle — the map preview follows this too
     watermark: { enabled: false, text: "", position: "br", font: "sans", sizePct: 2.8 },  // optional burned-in watermark
-    perSpeciesFolders: false,  // organize _labelled into one subfolder per species (off by default)
+    perSpeciesFolders: false,  // organize _tagged into one subfolder per species (off by default)
     lastApproxLocation: null,  // {lat, lon, radiusM} last manually-picked approximate location (for reuse)
     estimateTarget: null,      // photo the estimate-location modal is currently reviewing
     estimateResult: null,      // {lat, lon, method, basis} pending confirmation
   };
+
+  // Checkboxes for what a plant photo shows — plain, visible keywords (like
+  // star ratings), any number of which can apply at once. Applied at save
+  // time alongside the taxon keywords, so unsaved changes are discarded on
+  // navigation just like the caption and extra-keywords box.
+  const CHAR_TAGS = ["Dormant", "Flowering", "Fruiting", "Detail", "Habitat"];
 
   // ---- tiny DOM helpers ----------------------------------------------------
   const $ = (id) => document.getElementById(id);
@@ -202,39 +217,67 @@
     return {};
   }
 
-  // Build the keyword set for a set of taxa: full name (species), genus,
-  // family, then any taxonomy attributes (e.g. "invasive") — always in that
-  // order, so the keyword list reads the same way every time. The caption
-  // itself never carries attributes — only these keywords do.
+  // Build the keyword set for a set of taxa, grouped by category — species,
+  // then family, then genus, then everything else (taxonomy attributes, e.g.
+  // "invasive" or a higher rank like order, plus any manual/characteristic
+  // keywords merged in by the callers below) — alphabetically within each
+  // group, regardless of the order the taxa were typed in or which taxon
+  // each keyword came from. Attribute columns the user has opted out of (see
+  // S.disabledAttrCols / the "Keyword attributes" list in Setup) are skipped
+  // entirely. The caption itself never carries attributes — only these
+  // keywords do.
   const BOOL_TRUE = /^(yes|true|1|x|y|ja|wahr|si|oui)$/i;
-  function autoKeywords(taxa) {
-    const kws = [];
-    const push = (s) => {
+  const alphaCompare = (a, b) => a.localeCompare(b, undefined, { sensitivity: "base", numeric: true });
+  function computeKeywordGroups(taxa) {
+    const seen = new Set();
+    const groups = { species: [], family: [], genus: [], rest: [] };
+    const push = (group, s) => {
       s = (s || "").toString().trim();
-      if (s && !kws.some((k) => k.toLowerCase() === s.toLowerCase())) kws.push(s);
+      const key = s.toLowerCase();
+      if (s && !seen.has(key)) { seen.add(key); groups[group].push(s); }
     };
     for (const t of taxa) {
       if (!t) continue;
       const clean = t.replace(/\s+cf\.\s+/i, " ").trim();     // keywords ignore the cf. marker
-      push(clean);                                            // full name (species)
-      push(clean.split(/\s+/)[0]);                            // genus
+      push("species", clean);                                // full name (species)
+      push("genus", clean.split(/\s+/)[0]);                   // genus
       let fam = familyFor(t);
       if (!fam && $("familyBox")) fam = $("familyBox").value.trim();
-      if (fam) push(fam);                                     // family
+      if (fam) push("family", fam);                           // family
       const attrs = attrsOf(t);
-      for (const [col, val] of Object.entries(attrs)) push(BOOL_TRUE.test(val) ? col : val);
+      for (const [col, val] of Object.entries(attrs)) {
+        if (S.disabledAttrCols.has(col)) continue;
+        push("rest", BOOL_TRUE.test(val) ? col : val);
+      }
     }
-    return kws;
+    for (const g of Object.values(groups)) g.sort(alphaCompare);
+    return groups;
+  }
+  function flattenKeywordGroups(g) {
+    return [...g.species, ...g.family, ...g.genus, ...g.rest];
+  }
+  function autoKeywords(taxa) {
+    return flattenKeywordGroups(computeKeywordGroups(taxa));
+  }
+  // Merge extra (manual/characteristic) keywords into the "rest" group,
+  // skipping anything already present anywhere, then re-sort just that group.
+  function mergeIntoRest(groups, extra) {
+    const seen = new Set(flattenKeywordGroups(groups).map((k) => k.toLowerCase()));
+    for (const m of extra) {
+      const s = (m || "").toString().trim();
+      const key = s.toLowerCase();
+      if (s && !seen.has(key)) { seen.add(key); groups.rest.push(s); }
+    }
+    groups.rest.sort(alphaCompare);
+    return groups;
   }
   function parseManualKeywords(str) {
     return (str || "").split(/[;,\n]/).map((s) => s.trim()).filter(Boolean);
   }
   function keywordsForSave(taxa) {
-    const kws = autoKeywords(taxa);
-    for (const m of parseManualKeywords($("keywordsBox") && $("keywordsBox").value)) {
-      if (!kws.some((k) => k.toLowerCase() === m.toLowerCase())) kws.push(m);
-    }
-    return kws;
+    const groups = computeKeywordGroups(taxa);
+    const extra = [...S.charTags, ...parseManualKeywords($("keywordsBox") && $("keywordsBox").value)];
+    return flattenKeywordGroups(mergeIntoRest(groups, extra));
   }
   // Extra keywords on a photo that aren't derivable from its taxa (the manual ones).
   function manualKeywordsFromPhoto(p) {
@@ -246,11 +289,8 @@
   // photo's own existing keywords instead of the (single, currently-focused)
   // keywords box — needed for a bulk pass across many photos at once.
   function recomputedKeywordsFor(p, taxa) {
-    const kws = autoKeywords(taxa);
-    for (const m of manualKeywordsFromPhoto(p)) {
-      if (!kws.some((k) => k.toLowerCase() === m.toLowerCase())) kws.push(m);
-    }
-    return kws;
+    const groups = computeKeywordGroups(taxa);
+    return flattenKeywordGroups(mergeIntoRest(groups, manualKeywordsFromPhoto(p)));
   }
   // Recompose a photo's caption from its own taxa against the CURRENT
   // taxonomy — used by the refresh below to fix captions that are missing a
@@ -274,7 +314,7 @@
     }).filter(Boolean).join(", ");
   }
   // Setup & tools: "Refresh captions & keywords for already-captioned
-  // photos" — re-derive genus/species/family/attribute keywords AND the
+  // photos" — re-derive species/family/genus/attribute keywords AND the
   // caption's family suffix from the current taxonomy for every photo that
   // already has a real caption (skips "Indet." — there's no taxon to derive
   // anything from). Catches taxa whose family lookup used to fail — a
@@ -283,9 +323,9 @@
   // binomial and, for a bare genus, to any species in that genus. Previews
   // the change count before writing anything.
   async function refreshAllKeywords() {
-    const candidates = S.photos.filter((p) => p.caption && p.caption !== CFG.undeterminedCaption);
-    if (!candidates.length) { toast("No captioned photos here to check.", "info", 4500); return; }
+    const candidates = S.photos.filter((p) => p.caption && p.caption !== CFG.nontaxaCaption);
     const updates = [];
+    const seen = new Set();
     for (const p of candidates) {
       const taxa = taxaFromCaption(p.caption);
       if (!taxa.length) continue;
@@ -294,32 +334,63 @@
       const norm = (arr) => arr.map((k) => k.toLowerCase()).sort().join("|");
       const keywordsChanged = norm(p.keywords || []) !== norm(next);
       const captionChanged = nextCaption && nextCaption !== p.caption;
-      if (keywordsChanged || captionChanged) updates.push({ p, next, nextCaption, captionChanged, keywordsChanged });
+      const migrating = !!p._legacyStatusMarker;
+      if (keywordsChanged || captionChanged || migrating) {
+        updates.push({ p, taxa, next, nextCaption, captionChanged, keywordsChanged, migrating });
+        seen.add(p);
+      }
     }
-    if (!updates.length) { toast(`Checked ${candidates.length} captioned photo(s) — captions and keywords are already up to date.`, "info", 6000); return; }
+    // Photos that only need their old-style status marker/folder migrated to
+    // the current one — e.g. a non-taxon photo tagged before the untouched/
+    // tagged/deleted/nontaxa cleanup, which has no taxon caption to refresh.
+    for (const p of S.photos) {
+      if (seen.has(p) || !p._legacyStatusMarker) continue;
+      updates.push({ p, taxa: null, next: null, nextCaption: null, captionChanged: false, keywordsChanged: false, migrating: true });
+    }
+    if (!updates.length) { toast(`Checked ${candidates.length} captioned photo(s) — everything is already up to date.`, "info", 6000); return; }
     const preview = updates.slice(0, 8).map((u) => `• ${u.p.name}` + (u.captionChanged ? ` → “${u.nextCaption}”` : "")).join("\n");
     const more = updates.length > 8 ? `\n…and ${updates.length - 8} more` : "";
     const captionCount = updates.filter((u) => u.captionChanged).length;
-    if (!confirm(`Update ${updates.length} of ${candidates.length} captioned photo(s) — keywords` +
-      (captionCount ? `, and ${captionCount} caption(s) (e.g. a forgotten family)` : "") +
+    const migratingCount = updates.filter((u) => u.migrating).length;
+    if (!confirm(`Update ${updates.length} photo(s) — keywords` +
+      (captionCount ? `, ${captionCount} caption(s) (e.g. a forgotten family)` : "") +
+      (migratingCount ? `, ${migratingCount} moved to the current status folder/marker` : "") +
       ` — based on the current taxonomy?\n${preview}${more}`)) return;
     openSyncOverlay("Syncing keywords…");
     setBusy("Updating captions & keywords…");
+    const pre = {
+      photos: S.photos.map((q) => ({ ...q, fileHandle: null, url: null, _apBlob: null })),
+      idx: S.idx, lastCaption: S.lastCaption, recent: [...S.recent],
+    };
+    const undos = [];
     let n = 0;
     const results = [];
     try {
-      for (const { p, next, nextCaption, captionChanged, keywordsChanged } of updates) {
+      for (const { p, taxa, next, nextCaption, captionChanged, keywordsChanged, migrating } of updates) {
         try {
-          await writeCaptionKeywords(p, nextCaption, next, p.inatUrl);
-          p.caption = nextCaption; p.keywords = next; p.url = null;
+          const caption = nextCaption || p.caption;
+          const keywords = next || p.keywords;
+          if (S.mode === "applephotos") {
+            await applyStatus(p, p.status, caption, null, taxa, keywords, null);
+          } else {
+            const origBytes = S.mode === "fs" ? await getFileBytes(p) : null;
+            const bytes = await composeSaveBytes(p, caption, keywords);
+            await applyStatus(p, p.status, caption, bytes, taxa, keywords, origBytes);
+          }
+          if (S.undo && S.undo.fileUndo) undos.push(S.undo.fileUndo);
+          p._legacyStatusMarker = false;
           n++;
           const parts = [];
           if (captionChanged) parts.push(`caption → “${nextCaption}”`);
           if (keywordsChanged) parts.push("keywords updated");
+          if (migrating) parts.push("moved to the current status folder/marker");
           results.push({ title: p.name, detail: parts.join(" · ") });
         } catch (e) { console.warn("caption/keyword refresh failed for", p.name, e); }
       }
       render();
+      S.undo = { ...pre, fileUndo: async () => {
+        for (const u of undos.reverse()) { try { await u(); } catch (e) { console.warn(e); } }
+      } };
       finishSyncOverlay("Done!", `Updated ${n} of ${updates.length} photo${updates.length === 1 ? "" : "s"}.`, results);
     } catch (e) {
       console.error(e); toast("Refreshing captions & keywords failed: " + (e.message || e) + ".", "warn", 9000);
@@ -566,6 +637,35 @@
     for (const rec of (await idb.get("taxadd:global")) || []) mergeRecord(rec);
     rebuildChoices();
     updateTaxonomyStatus();
+    const cols = new Set();
+    for (const attrs of S.taxAttrs.values()) for (const k of Object.keys(attrs)) cols.add(k);
+    S.availableAttrCols = [...cols].sort(alphaCompare);
+    renderAttrColsList();
+  }
+  // Checkbox list of every attribute column seen across the active
+  // taxonomies (e.g. a higher rank like "order", or a status flag like
+  // "invasive") — unticked ones are left out of auto-generated keywords
+  // entirely, even if a taxon has a value for them (see S.disabledAttrCols,
+  // used in computeKeywordGroups).
+  function renderAttrColsList() {
+    const box = $("attrColsList");
+    if (!box) return;
+    box.innerHTML = "";
+    if (!S.availableAttrCols.length) {
+      box.append(el("p", { className: "hint", textContent: "None yet — appears once an active taxonomy has columns beyond taxon/family." }));
+      return;
+    }
+    for (const col of S.availableAttrCols) {
+      const row = el("label", { className: "tx-row" });
+      const cb = el("input", { type: "checkbox" });
+      cb.checked = !S.disabledAttrCols.has(col);
+      cb.addEventListener("change", () => {
+        if (cb.checked) S.disabledAttrCols.delete(col); else S.disabledAttrCols.add(col);
+        LS.set("disabledAttrCols", [...S.disabledAttrCols]);
+      });
+      row.append(cb, el("span", { className: "tx-name", textContent: col }));
+      box.append(row);
+    }
   }
   function updateTaxonomyStatus() {
     if (!$("taxonomyStatus")) return;
@@ -883,16 +983,16 @@
       const caption = composeForTaxa(taxa) || p.caption || "";
       const keywords = keywordsForSave(taxa);
       // Route through applyStatus (same as a normal save) so a successful
-      // iNaturalist post also marks the photo "labelled" — posting to iNat
+      // iNaturalist post also marks the photo "tagged" — posting to iNat
       // IS an identification, it shouldn't leave the photo looking untouched
       // — and picks up undo for free. inatUrl is passed through rather than
       // set on p directly, so undo correctly restores the old (or absent) link.
       if (S.mode === "applephotos") {
-        await applyStatus(p, "labelled", caption, null, taxa, keywords, null, url);
+        await applyStatus(p, "tagged", caption, null, taxa, keywords, null, url);
       } else {
         const origBytes = S.mode === "fs" ? await getFileBytes(p) : null;
         const bytes = await composeSaveBytes(p, caption, keywords, url);
-        await applyStatus(p, "labelled", caption, bytes, taxa, keywords, origBytes, url);
+        await applyStatus(p, "tagged", caption, bytes, taxa, keywords, origBytes, url);
       }
       render();
       showInatCelebration(url);
@@ -905,7 +1005,7 @@
   // (shift-click a range, Cmd/Ctrl-click to toggle) feeds this — one
   // observation, every selected photo attached to it as an
   // observation_photo, same as picking "add more photos" by hand on
-  // iNaturalist's own site. Every photo in the group is marked "labelled",
+  // iNaturalist's own site. Every photo in the group is marked "tagged",
   // same as the single-photo flow, with one combined Undo for the batch.
   async function inatCreateObservationFromSelection() {
     const targets = [...S.multiSel].sort((a, b) => a - b).map((i) => S.photos[i]).filter(Boolean);
@@ -983,11 +1083,11 @@
         } catch (e) { console.warn("photo upload to iNaturalist failed for", p.name, e); }
         try {
           if (S.mode === "applephotos") {
-            await applyStatus(p, "labelled", caption, null, taxa, keywords, null, url);
+            await applyStatus(p, "tagged", caption, null, taxa, keywords, null, url);
           } else {
             const origBytes = S.mode === "fs" ? await getFileBytes(p) : null;
             const bytes = await composeSaveBytes(p, caption, keywords, url);
-            await applyStatus(p, "labelled", caption, bytes, taxa, keywords, origBytes, url);
+            await applyStatus(p, "tagged", caption, bytes, taxa, keywords, origBytes, url);
           }
           if (S.undo && S.undo.fileUndo) undos.push(S.undo.fileUndo);
         } catch (e) { console.warn("local metadata write failed for", p.name, e); }
@@ -1201,9 +1301,9 @@
     if (!who) { setBusy(null); toast("Couldn’t identify your iNaturalist account.", "warn"); return; }
 
     // Every photo with a date is a candidate, regardless of status — not just
-    // untouched ones. Someone may have already hand-labelled, skipped or even
-    // deleted a photo before finding this screening tool, and still wants it
-    // checked and linked against their iNaturalist account.
+    // untouched ones. Someone may have already hand-tagged or even deleted a
+    // photo before finding this screening tool, and still wants it checked
+    // and linked against their iNaturalist account.
     const candidates = S.photos.filter((p) => p.datetime);
     if (!candidates.length) { setBusy(null); toast("No dated photos to screen (still-loading dates are skipped — try again in a moment).", "info", 7000); return; }
 
@@ -1303,19 +1403,18 @@
     setBusy("Linking…");
     try {
       const taxonName = cand.o.taxonName;
-      const caption = taxonName ? composeCaption(taxonName, familyFor(taxonName)) : CFG.undeterminedCaption;
+      const caption = taxonName ? composeCaption(taxonName, familyFor(taxonName)) : CFG.nontaxaCaption;
       const keywords = taxonName ? autoKeywords([taxonName]) : [];
-      p.inatUrl = cand.o.uri;
       // No taxon on the matched observation yet ("Unknown"/unidentified) — file
-      // it as undetermined rather than labelled, so the status badge matches
-      // the "Indet." caption instead of implying a real determination.
-      const nextStatus = taxonName ? "labelled" : "undetermined";
+      // it as non-taxon rather than tagged, so the status badge matches the
+      // "Indet." caption instead of implying a real determination.
+      const nextStatus = taxonName ? "tagged" : "nontaxa";
       if (S.mode === "applephotos") {
-        await applyStatus(p, nextStatus, caption, null, taxonName ? [taxonName] : null, keywords, null);
+        await applyStatus(p, nextStatus, caption, null, taxonName ? [taxonName] : null, keywords, null, cand.o.uri);
       } else {
         const origBytes = S.mode === "fs" ? await getFileBytes(p) : null;
-        const bytes = await composeSaveBytes(p, caption, keywords);
-        await applyStatus(p, nextStatus, caption, bytes, taxonName ? [taxonName] : null, keywords, origBytes);
+        const bytes = await composeSaveBytes(p, caption, keywords, cand.o.uri);
+        await applyStatus(p, nextStatus, caption, bytes, taxonName ? [taxonName] : null, keywords, origBytes, cand.o.uri);
       }
       S.matchSummary.linked++;
     } catch (e) {
@@ -1761,6 +1860,22 @@
           await collectFrom(sub, status, photos, dir, stats);
         } catch { /* subfolder doesn't exist yet */ }
       }
+      // Folders from before the status cleanup: recognized so nothing already
+      // sorted this way is orphaned, and flagged for a physical move into the
+      // current folder name next time refreshAllKeywords (or a save) touches
+      // them. _skipped has no new home — its contents just count as untouched.
+      for (const [status, dir] of Object.entries(LEGACY_STATUS_DIRS)) {
+        try {
+          const sub = await S.rootHandle.getDirectoryHandle(dir);
+          const before = photos.length;
+          await collectFrom(sub, status, photos, dir, stats);
+          for (let i = before; i < photos.length; i++) photos[i]._legacyStatusMarker = true;
+        } catch { /* legacy subfolder doesn't exist */ }
+      }
+      try {
+        const sub = await S.rootHandle.getDirectoryHandle(LEGACY_SKIPPED_DIR);
+        await collectFrom(sub, "untouched", photos, LEGACY_SKIPPED_DIR, stats);
+      } catch { /* legacy subfolder doesn't exist */ }
       reportScan(stats, photos.length);
       beginSession(photos);                 // shows photos immediately; dates load after
     } catch (e) {
@@ -1796,7 +1911,12 @@
     S.undo = null;
     S.inatResults = []; S.inatResultsFor = null;
     S.multiSel.clear(); S.selAnchor = null; S._filmSig = null;
-    clearSelection();
+    // Derive the panel state (taxa, cf, caption/keyword boxes, characteristic
+    // checkboxes) from the first photo shown — empty for the usual untouched
+    // start, populated if the album opens on an already-tagged photo. Crucially
+    // this also resets S.charTags, so a characteristic checked in a previous
+    // session/album can't linger and get silently applied to the first save.
+    syncSelectionFromCaption();
     render();
     // Apple Photos mode already gets datetime/GPS from the helper — no EXIF
     // re-read needed for those — but caption/keywords are deliberately left
@@ -1807,7 +1927,76 @@
     if (photos.length) {
       if (S.mode === "applephotos") loadApplePhotosMetaInBackground(photos);
       else loadMetaInBackground(photos);
+      warmupPreviews(photos);
     }
+  }
+
+  // How many upcoming photos to keep warmed ahead of the current one in
+  // Apple Photos mode. Kept below PREVIEW_EVICT_DISTANCE so a just-warmed
+  // image isn't immediately evicted again.
+  const PREVIEW_WARM_AHEAD = 8;
+  const PREVIEW_EVICT_DISTANCE = 10;
+
+  // Preloads photos in the background instead of only ever fetching one on
+  // demand when it's opened — that on-demand-only behavior is what made
+  // browsing feel like each photo "popped in" one at a time.
+  //
+  // Local files (fs/download): an object URL is just a cheap reference to an
+  // already-on-disk (or already-in-memory) File, so the whole list is warmed
+  // — the entire session ends up preloaded for free.
+  //
+  // Apple Photos: each image is a full-resolution JPEG fetched over HTTP and
+  // held in memory (p._apBlob), so warming the WHOLE album could hold
+  // gigabytes. Instead only a bounded window ahead of the current photo is
+  // kept warm (warmApplePhotosWindow), and it follows the current photo as
+  // the user moves (re-invoked from render), with evictFarPreviews dropping
+  // anything left far behind.
+  async function warmupPreviews(photos) {
+    const token = ++S.warmToken;
+    if (S.mode === "applephotos") { warmApplePhotosWindow(); return; }
+    const order = photos.filter((p) => p !== S.photos[S.idx]);
+    let next = 0;
+    async function worker() {
+      while (next < order.length) {
+        if (token !== S.warmToken) return;               // a newer session superseded this one
+        const p = order[next++];
+        if (!p || p.url) continue;
+        try { p.url = URL.createObjectURL(await getFile(p)); }
+        catch { /* leave it to load on demand instead */ }
+      }
+    }
+    await Promise.all([worker(), worker(), worker()]);
+  }
+
+  // Warm the next few visible photos after the current one. getFile() dedups
+  // in-flight fetches, so calling this on every navigation is cheap — it only
+  // kicks off downloads for upcoming photos not already loading.
+  function warmApplePhotosWindow() {
+    if (S.mode !== "applephotos") return;
+    const vis = visibleIdx();
+    const pos = vis.indexOf(S.idx);
+    if (pos < 0) return;
+    for (let k = 1; k <= PREVIEW_WARM_AHEAD; k++) {
+      const i = vis[pos + k];
+      if (i == null) break;
+      const q = S.photos[i];
+      if (q && !q._apBlob) getFile(q).catch(() => {});
+    }
+  }
+
+  // p._apBlob (Apple Photos mode) holds a fully downloaded image in memory —
+  // evict it once we're far from the current photo, or browsing a big album
+  // would quietly hold hundreds of MB. Local files (fs/download mode) don't
+  // have this cost — p.url is just a reference to an already-on-disk File —
+  // so once warmed those are left alone for the rest of the session instead
+  // of being re-fetched over and over.
+  function evictFarPreviews() {
+    S.photos.forEach((q, i) => {
+      if (q._apBlob && Math.abs(i - S.idx) > PREVIEW_EVICT_DISTANCE) {
+        if (q.url) { URL.revokeObjectURL(q.url); q.url = null; }
+        q._apBlob = null;
+      }
+    });
   }
 
   function withTimeout(promise, ms) {
@@ -1878,9 +2067,14 @@
           const caption = got.caption || "";
           const keywords = stripReservedKeywords(rawKw);
           let status = statusFromKeywords(rawKw);
-          if (status === "untouched" && (caption.trim() || keywords.length)) status = "preexisting";
+          // A photo tagit hasn't touched (no tagit: marker) but which already
+          // carries a caption or real keywords isn't "untouched" — it was
+          // captioned elsewhere (Photos itself, a previous import, another
+          // tool). Count it as tagged rather than hiding it among the blank ones.
+          if (status === "untouched" && (caption.trim() || keywords.length)) status = "tagged";
           p.caption = caption; p.keywords = keywords; p.status = status;
           p.inatUrl = inatUrlFromKeywords(rawKw);
+          p._legacyStatusMarker = hasLegacyStatusMarker(rawKw);
         }
       } catch (e) { console.warn("meta batch failed", e); }
       if (token !== S.metaToken) return;
@@ -1946,22 +2140,36 @@
   // A third source alongside "fs" and "download": photos picked from the
   // user's real Photos library through Apple's Limited Photos Access picker,
   // served by a tiny helper app running on 127.0.0.1. Photos has no folder-
-  // move concept, so status ("labelled"/"skipped"/…) is instead tracked with
-  // reserved keywords written back alongside the real caption/keywords — never
-  // shown to the user, stripped before display, re-applied on save. The linked
-  // iNaturalist observation (normally stashed in XMP, which this source never
-  // writes) is tracked the same way.
+  // move concept, so status ("tagged"/"nontaxa"/"deleted") is instead tracked
+  // with reserved keywords written back alongside the real caption/keywords —
+  // never shown to the user, stripped before display, re-applied on save. The
+  // linked iNaturalist observation (normally stashed in XMP, which this
+  // source never writes) is tracked the same way.
   const APPLE_PHOTOS_STATUS_KW = {
-    labelled: "tagit:labelled", skipped: "tagit:skipped",
-    undetermined: "tagit:undetermined", deleted: "tagit:deleted",
+    tagged: "tagit:tagged", nontaxa: "tagit:nontaxa", deleted: "tagit:deleted",
   };
+  // Markers from before the untouched/tagged/deleted/nontaxa cleanup —
+  // recognized on read so nothing already marked this way is orphaned, and
+  // rewritten to the current marker the next time that photo's keywords are
+  // written (any save, or a keyword-sync pass — see refreshAllKeywords).
+  // "tagit:skipped" isn't remapped to anything: that status was retired
+  // outright, so a photo carrying it is just treated as untouched.
+  const LEGACY_STATUS_KW = { tagged: "tagit:labelled", nontaxa: "tagit:undetermined" };
+  const RETIRED_STATUS_KW = ["tagit:skipped"];
   const INAT_KW_PREFIX = "tagit:inat:";
   function statusFromKeywords(keywords) {
     for (const [status, kw] of Object.entries(APPLE_PHOTOS_STATUS_KW)) if (keywords.includes(kw)) return status;
+    for (const [status, kw] of Object.entries(LEGACY_STATUS_KW)) if (keywords.includes(kw)) return status;
     return "untouched";
   }
+  // True if this photo's status came from a pre-cleanup marker (legacy or
+  // retired) rather than the current one — used to trigger a one-time rewrite.
+  function hasLegacyStatusMarker(keywords) {
+    return Object.values(LEGACY_STATUS_KW).some((kw) => keywords.includes(kw)) ||
+      RETIRED_STATUS_KW.some((kw) => keywords.includes(kw));
+  }
   function stripReservedKeywords(keywords) {
-    const marks = new Set(Object.values(APPLE_PHOTOS_STATUS_KW));
+    const marks = new Set([...Object.values(APPLE_PHOTOS_STATUS_KW), ...Object.values(LEGACY_STATUS_KW), ...RETIRED_STATUS_KW]);
     return (keywords || []).filter((k) => !marks.has(k) && !k.startsWith(INAT_KW_PREFIX));
   }
   function inatUrlFromKeywords(keywords) {
@@ -1970,6 +2178,8 @@
     // Digits only — the marker keyword is user-editable in Photos itself.
     return /^\d+$/.test(id) ? `https://www.inaturalist.org/observations/${id}` : "";
   }
+  // Always writes the CURRENT marker for `status` — this is what migrates a
+  // photo off a legacy marker the moment its keywords are next written.
   function withReservedKeywords(keywords, status, inatUrl) {
     const clean = stripReservedKeywords(keywords);
     const mark = APPLE_PHOTOS_STATUS_KW[status];
@@ -2060,8 +2270,8 @@
 
   // Persist caption+keywords(+inatUrl, +status) to the current source, used by
   // the iNaturalist create/sync/refresh helpers which write outside of the
-  // main Save/Skip/Undetermined/Delete flow (that flow goes through
-  // applyStatus/commit instead).
+  // main Save/Non-taxon/Delete flow (that flow goes through applyStatus/commit
+  // instead).
   async function writeCaptionKeywords(p, caption, keywords, inatUrl) {
     if (S.mode === "applephotos") {
       const wire = withReservedKeywords(keywords, p.status, inatUrl != null ? inatUrl : p.inatUrl);
@@ -2300,9 +2510,8 @@
         // A photo tagit hasn't touched (no tagit: marker) but which already
         // carries a caption or real keywords isn't "untouched" — it was
         // captioned elsewhere (Photos itself, a previous import, another
-        // tool). Surface it as its own "already tagged" category so it's
-        // visible and filterable, instead of hiding among the blank ones.
-        if (status === "untouched" && (caption.trim() || keywords.length)) status = "preexisting";
+        // tool). Count it as tagged rather than hiding it among the blank ones.
+        if (status === "untouched" && (caption.trim() || keywords.length)) status = "tagged";
         return {
           name: ap.filename, status,
           assetId: ap.id, fileHandle: null, parentDir: null, parentHandle: null,
@@ -2311,6 +2520,7 @@
           approxLat: null, approxLon: null, approxUncertaintyM: null,
           caption, keywords,
           inatUrl: inatUrlFromKeywords(rawKw), orientation: 1, url: null,
+          _legacyStatusMarker: hasLegacyStatusMarker(rawKw),
         };
       });
       const n = photos.length;
@@ -2357,9 +2567,17 @@
   async function getFile(p) {
     if (S.mode === "applephotos") {
       if (p._apBlob) return p._apBlob;
-      const res = await apFetch(`/photos/${encodeURIComponent(p.assetId)}/image`);
-      p._apBlob = new File([await res.blob()], p.name, { type: "image/jpeg" });
-      return p._apBlob;
+      // The background warmup (warmupPreviews) and an on-demand call from
+      // render() can both land on the same not-yet-fetched photo at once —
+      // share the one in-flight fetch instead of downloading it twice.
+      if (!p._apBlobPromise) {
+        p._apBlobPromise = (async () => {
+          const res = await apFetch(`/photos/${encodeURIComponent(p.assetId)}/image`);
+          p._apBlob = new File([await res.blob()], p.name, { type: "image/jpeg" });
+          return p._apBlob;
+        })().finally(() => { p._apBlobPromise = null; });
+      }
+      return p._apBlobPromise;
     }
     if (p.file) return p.file;
     return (await ensureHandle(p)).getFile();
@@ -2368,7 +2586,7 @@
     return new Uint8Array(await (await getFile(p)).arrayBuffer());
   }
   // Gets or creates a (possibly nested) folder under the root, e.g.
-  // subHandle("_labelled", "Drosera rotundifolia") for the per-species option.
+  // subHandle("_tagged", "Drosera rotundifolia") for the per-species option.
   async function subHandle(...segments) {
     const key = segments.join("/");
     if (!S.subHandles[key]) {
@@ -2401,7 +2619,7 @@
   // Write `bytes` for photo p and move it to `status`. In fs mode this rewrites
   // the file into the status subfolder and removes the original; in download
   // mode it just downloads the modified copy. Returns before/after for undo.
-  // `taxa` (the determined species) is only used when saving as "labelled"
+  // `taxa` (the determined species) is only used when saving as "tagged"
   // with the per-species-folders setting on.
   async function commit(p, bytes, status, taxa) {
     if (S.mode === "download") {
@@ -2410,7 +2628,7 @@
     }
     const statusDir = STATUS_DIRS[status] || null;         // null = stay at root (untouched)
     let segments = statusDir ? [statusDir] : null;
-    if (status === "labelled" && S.perSpeciesFolders && statusDir && taxa && taxa[0]) {
+    if (status === "tagged" && S.perSpeciesFolders && statusDir && taxa && taxa[0]) {
       segments = [statusDir, sanitizeFolderName(taxa[0].replace(/\s+cf\.\s+/i, " ").trim())];
     }
     const targetDir = segments ? segments.join("/") : null;
@@ -2568,50 +2786,55 @@
   }
   // One action applied to every selected photo, with ONE undo covering the
   // whole batch (the per-photo undos are chained under a single snapshot).
+  const BULK_ACTION_LABELS = {
+    tagged: { verb: "Tag", gerund: "Tagging" },
+    nontaxa: { verb: "Mark as non-taxon", gerund: "Marking as non-taxon" },
+    deleted: { verb: "Delete", gerund: "Deleting" },
+  };
   async function bulkApply(action) {
     const targets = [...S.multiSel].sort((a, b) => a - b).map((i) => S.photos[i]).filter(Boolean);
     if (targets.length < 2) return;
     let caption = null, taxa = null, keywords = null;
-    if (action === "labelled") {
+    if (action === "tagged") {
       caption = $("captionBox").value.trim();
       if (!caption) { toast("Type or pick a caption first — it will be applied to every selected photo.", "info", 5000); return; }
       taxa = taxaFromCaption(caption);
       keywords = keywordsForSave(taxa);
     }
-    const verb = { labelled: "Label", skipped: "Skip", undetermined: "Mark undetermined", deleted: "Delete" }[action];
-    if (!confirm(`${verb} ${targets.length} photos${action === "labelled" ? ` as “${caption}”` : ""}? One Undo reverts the whole batch.`)) return;
+    const { verb, gerund } = BULK_ACTION_LABELS[action];
+    if (!confirm(`${verb} ${targets.length} photos${action === "tagged" ? ` as “${caption}”` : ""}? One Undo reverts the whole batch.`)) return;
     const pre = {
       photos: S.photos.map((q) => ({ ...q, fileHandle: null, url: null, _apBlob: null })),
       idx: S.idx, lastCaption: S.lastCaption, recent: [...S.recent],
     };
     const undos = [];
     let done = 0, failed = 0;
-    setBusy(`${verb}ing…`);
+    setBusy(`${gerund}…`);
     try {
       for (const p of targets) {
         try {
-          if (action === "labelled") {
+          if (action === "tagged") {
             if (S.mode === "applephotos") {
-              await applyStatus(p, "labelled", caption, null, taxa, keywords, null);
+              await applyStatus(p, "tagged", caption, null, taxa, keywords, null);
             } else {
               const origBytes = S.mode === "fs" ? await getFileBytes(p) : null;
               const bytes = await composeSaveBytes(p, caption, keywords);
-              await applyStatus(p, "labelled", caption, bytes, taxa, keywords, origBytes);
+              await applyStatus(p, "tagged", caption, bytes, taxa, keywords, origBytes);
             }
-          } else if (action === "undetermined") {
+          } else if (action === "nontaxa") {
             let bytes = null, origBytes = null;
             if (S.mode !== "applephotos") {
               origBytes = S.mode === "fs" ? await getFileBytes(p) : null;
-              try { bytes = await composeSaveBytes(p, CFG.undeterminedCaption, []); } catch { /* move anyway */ }
+              try { bytes = await composeSaveBytes(p, CFG.nontaxaCaption, []); } catch { /* move anyway */ }
             }
-            await applyStatus(p, "undetermined", CFG.undeterminedCaption, bytes, null, [], origBytes);
+            await applyStatus(p, "nontaxa", CFG.nontaxaCaption, bytes, null, [], origBytes);
           } else {
             await applyStatus(p, action, null, null, null);
           }
           if (S.undo && S.undo.fileUndo) undos.push(S.undo.fileUndo);
           done++;
         } catch (e) { console.warn("bulk action failed for", p.name, e); failed++; }
-        setBusy(`${verb}ing… ${done + failed}/${targets.length}`);
+        setBusy(`${gerund}… ${done + failed}/${targets.length}`);
       }
     } finally { setBusy(null); }
     S.undo = { ...pre, fileUndo: async () => {
@@ -2668,17 +2891,16 @@
   }
   // ---- end-of-folder recap -------------------------------------------------
   function computeSessionStats() {
-    const labelled = S.photos.filter((p) => p.status === "labelled");
+    const tagged = S.photos.filter((p) => p.status === "tagged");
     const taxa = new Set(), keywords = new Set();
-    for (const p of labelled) {
+    for (const p of tagged) {
       for (const t of taxaFromCaption(p.caption)) taxa.add(t.toLowerCase());
       for (const k of (p.keywords || [])) keywords.add(k.toLowerCase());
     }
     return {
       total: S.photos.length,
-      labelled: labelled.length,
-      undetermined: S.photos.filter((p) => p.status === "undetermined").length,
-      skipped: S.photos.filter((p) => p.status === "skipped").length,
+      tagged: tagged.length,
+      nontaxa: S.photos.filter((p) => p.status === "nontaxa").length,
       deleted: S.photos.filter((p) => p.status === "deleted").length,
       taxa: taxa.size,
       keywords: keywords.size,
@@ -2692,11 +2914,10 @@
       el("div", { className: "congrats-label", textContent: label }),
     ]);
     const box = $("congratsStats"); box.innerHTML = "";
-    box.append(stat("Labelled", s.labelled));
+    box.append(stat("Tagged", s.tagged));
     box.append(stat("Taxa identified", s.taxa));
     box.append(stat("Keywords added", s.keywords));
-    if (s.undetermined) box.append(stat("Undetermined", s.undetermined));
-    if (s.skipped) box.append(stat("Skipped", s.skipped));
+    if (s.nontaxa) box.append(stat("Non-taxon", s.nontaxa));
     if (s.deleted) box.append(stat("Deleted", s.deleted));
     closeAllModals();               // don't let an open utility modal obscure the celebration
     $("congratsOverlay").hidden = false;
@@ -2858,11 +3079,11 @@
     try {
       const keywords = keywordsForSave(taxa);
       if (S.mode === "applephotos") {
-        await applyStatus(p, "labelled", caption, null, taxa, keywords, null);
+        await applyStatus(p, "tagged", caption, null, taxa, keywords, null);
       } else {
         const origBytes = S.mode === "fs" ? await getFileBytes(p) : null;
         const bytes = await composeSaveBytes(p, caption, keywords);
-        await applyStatus(p, "labelled", caption, bytes, taxa, keywords, origBytes);
+        await applyStatus(p, "tagged", caption, bytes, taxa, keywords, origBytes);
       }
       return true;
     } catch (e) {
@@ -2895,31 +3116,25 @@
     }
   }
 
-  async function markUndetermined() {
+  async function markNontaxa() {
     const p = current();
     if (!p) return;
     setBusy("Saving…");
     try {
-      const keywords = parseManualKeywords($("keywordsBox") && $("keywordsBox").value);
+      const keywords = keywordsForSave([]);
       if (S.mode === "applephotos") {
-        await applyStatus(p, "undetermined", CFG.undeterminedCaption, null, null, keywords, null);
+        await applyStatus(p, "nontaxa", CFG.nontaxaCaption, null, null, keywords, null);
       } else {
         const origBytes = S.mode === "fs" ? await getFileBytes(p) : null;
         let bytes = null;
-        try { bytes = await composeSaveBytes(p, CFG.undeterminedCaption, keywords); }
+        try { bytes = await composeSaveBytes(p, CFG.nontaxaCaption, keywords); }
         catch (e) { console.warn("caption write failed, moving anyway", e); }
-        await applyStatus(p, "undetermined", CFG.undeterminedCaption, bytes, null, keywords, origBytes);
+        await applyStatus(p, "nontaxa", CFG.nontaxaCaption, bytes, null, keywords, origBytes);
       }
       advance();
     } catch (e) {
-      console.error(e); toast("Couldn’t mark undetermined: " + (e.message || e), "warn", 7000);
+      console.error(e); toast("Couldn’t mark as non-taxon: " + (e.message || e), "warn", 7000);
     } finally { setBusy(null); }
-  }
-  async function skipCurrent() {
-    const p = current();
-    if (!p) return;
-    try { await applyStatus(p, "skipped", null, null, null); advance(); }
-    catch (e) { console.error(e); toast("Couldn’t skip: " + (e.message || e), "warn", 7000); }
   }
   async function discardCurrent() {
     const p = current();
@@ -2976,13 +3191,6 @@
     t = t.trim();
     if (t && !S.selected.includes(t)) { S.selected.push(t); renderSelection(); updateCaptionBox(); }
   }
-  function clearSelection() {
-    S.selected = []; S.cf = false;
-    if ($("cfBox")) $("cfBox").checked = false;
-    setCaptionBox("");
-    if ($("keywordsBox")) $("keywordsBox").value = "";
-    renderSelection(); renderFamilyBox();
-  }
   // Re-derive the taxon selection (and the caption box) from the current photo's
   // stored caption, so moving between photos always shows the right state and
   // never leaves the previous photo's caption stuck in the box.
@@ -2993,13 +3201,30 @@
     if ($("cfBox")) $("cfBox").checked = S.cf;
     renderSelection();
     setCaptionBox(composeForTaxa(S.selected));
-    if ($("keywordsBox")) $("keywordsBox").value = manualKeywordsFromPhoto(p).join(", ");
+    // Characteristics have their own checkboxes below, so they're left out of
+    // this free-text box — otherwise a checked "Flowering" would also show up
+    // here as literal text, which reads as a duplicate rather than a review.
+    const charLower = new Set(CHAR_TAGS.map((t) => t.toLowerCase()));
+    if ($("keywordsBox")) {
+      $("keywordsBox").value = manualKeywordsFromPhoto(p).filter((k) => !charLower.has(k.toLowerCase())).join(", ");
+    }
+    syncCharTagsFromPhoto(p);
     renderFamilyBox();
     // Never leave leftover search text (or a blinking cursor) sitting in the
     // taxon search box on the new photo — typing again should always start
     // a fresh search, not append to whatever was typed for the last one.
     const taxonInput = $("taxonInput");
     if (taxonInput) { taxonInput.value = ""; taxonInput.blur(); }
+  }
+  function syncCharTagsFromPhoto(p) {
+    const kws = new Set((p ? p.keywords : []).map((k) => k.toLowerCase()));
+    S.charTags = new Set(CHAR_TAGS.filter((t) => kws.has(t.toLowerCase())));
+    renderCharTags();
+  }
+  function renderCharTags() {
+    const box = $("charTags");
+    if (!box) return;
+    for (const input of box.querySelectorAll("input[type=checkbox]")) input.checked = S.charTags.has(input.value);
   }
   function updateCaptionBox() {
     setCaptionBox(composeForTaxa(S.selected));
@@ -3016,10 +3241,6 @@
 
   async function render() {
     const p = current();
-    // The "Already tagged" status only ever occurs in Apple Photos mode —
-    // its filter chip stays out of the folder workflow entirely.
-    const preSeg = document.querySelector(".seg-preexisting");
-    if (preSeg) preSeg.hidden = S.mode !== "applephotos";
     if (S._zoomPhoto !== p) {
       S._zoomPhoto = p; resetZoom();
       if (!$("mapModal").hidden) closeModal("mapModal");  // don't leave the old photo's location showing
@@ -3052,22 +3273,8 @@
       $("photo").src = "";
       toast("Couldn't load this photo's image: " + (e.message || e), "warn", 8000);
     }
-    // Quietly warm up the next couple of visible photos so advancing feels
-    // instant. And since each fetched image is cached as a blob, evict the
-    // ones far from the current photo, or browsing a few hundred photos
-    // would quietly hold hundreds of MB.
-    if (S.mode === "applephotos") {
-      for (const i of visibleIdx().filter((i) => i > S.idx).slice(0, 2)) {
-        const q = S.photos[i];
-        if (q && !q._apBlob) getFile(q).catch(() => {});
-      }
-      S.photos.forEach((q, i) => {
-        if (q._apBlob && Math.abs(i - S.idx) > 10) {
-          if (q.url) { URL.revokeObjectURL(q.url); q.url = null; }
-          q._apBlob = null;
-        }
-      });
-    }
+    evictFarPreviews();
+    warmApplePhotosWindow();   // keep the next few upcoming photos ready (Apple Photos only)
 
     // Everything about this photo overlays the bottom of the photo itself —
     // filename first, then date/time/locality/caption/keywords/link. Status
@@ -3116,34 +3323,29 @@
 
   const STATUS_LABEL = {
     untouched: { text: "○ untouched", color: "#7a857d" },
-    preexisting: { text: "◑ already tagged", color: "#3b7cc4" },
-    labelled: { text: "✓ labelled", color: "#2f8f5b" },
-    skipped: { text: "• skipped", color: "#b7791f" },
-    undetermined: { text: "? undetermined", color: "#6d5bd0" },
+    tagged: { text: "✓ tagged", color: "#2f8f5b" },
     deleted: { text: "✗ deleted", color: "#c0392b" },
+    nontaxa: { text: "⊘ non-taxon", color: "#6d5bd0" },
   };
   const _p2 = (n) => String(n).padStart(2, "0");
   function fmtDate(d) { return `${fmtDay(d)} ${fmtTime(d)}`; }
   function fmtDay(d) { return `${d.getFullYear()}-${_p2(d.getMonth() + 1)}-${_p2(d.getDate())}`; }
   function fmtTime(d) { return `${_p2(d.getHours())}:${_p2(d.getMinutes())}`; }
   function renderCounts() {
-    const c = { untouched: 0, preexisting: 0, labelled: 0, skipped: 0, undetermined: 0, deleted: 0 };
+    const c = { untouched: 0, tagged: 0, deleted: 0, nontaxa: 0 };
     for (const p of S.photos) c[p.status]++;
     const total = Math.max(S.photos.length, 1);
-    const done = c.labelled + c.skipped + c.deleted;
+    const done = c.tagged + c.deleted;
     $("barDone").style.width = Math.round((100 * done) / total) + "%";
-    if ($("barPre")) $("barPre").style.width = Math.round((100 * c.preexisting) / total) + "%";
-    $("barUndet").style.width = Math.round((100 * c.undetermined) / total) + "%";
+    $("barNontaxa").style.width = Math.round((100 * c.nontaxa) / total) + "%";
     // "Untouched" is always shown — it's the one number that answers "how
     // much work is left". Every other category only appears once it's
     // actually non-zero, so a fresh folder/album doesn't read as a wall of
-    // "0 skipped, 0 undetermined, 0 deleted" noise.
+    // "0 deleted, 0 non-taxon" noise.
     const parts = [`${c.untouched} untouched`];
-    if (c.preexisting) parts.push(`${c.preexisting} already tagged`);
-    if (c.labelled) parts.push(`${c.labelled} labelled`);
-    if (c.skipped) parts.push(`${c.skipped} skipped`);
-    if (c.undetermined) parts.push(`${c.undetermined} undetermined`);
+    if (c.tagged) parts.push(`${c.tagged} tagged`);
     if (c.deleted) parts.push(`${c.deleted} deleted`);
+    if (c.nontaxa) parts.push(`${c.nontaxa} non-taxon`);
     $("progressText").textContent =
       parts.join(", ") + ` (showing #${S.photos.length ? S.idx + 1 : 0} of ${S.photos.length})`;
   }
@@ -3457,11 +3659,16 @@
     $("nextBtn").onclick = goNext;
     $("rotateBtn").onclick = rotateCurrent;
     $("undoBtn").onclick = doUndo;
-    $("skipBtn").onclick = skipCurrent;
-    $("undetBtn").onclick = markUndetermined;
+    $("undetBtn").onclick = markNontaxa;
     $("deleteBtn").onclick = discardCurrent;
 
     $("cfBox").addEventListener("change", (e) => { S.cf = e.target.checked; updateCaptionBox(); });
+
+    if ($("charTags")) $("charTags").addEventListener("change", (e) => {
+      const input = e.target.closest("input[type=checkbox]");
+      if (!input) return;
+      if (input.checked) S.charTags.add(input.value); else S.charTags.delete(input.value);
+    });
 
     // status filter checkboxes
     document.querySelectorAll("#statusFilter input").forEach((cb) => {
@@ -3484,10 +3691,9 @@
     if ($("exportCsvBtn")) $("exportCsvBtn").onclick = exportCsv;
 
     // filmstrip bulk actions
-    if ($("bulkApplyBtn")) $("bulkApplyBtn").onclick = () => bulkApply("labelled");
+    if ($("bulkApplyBtn")) $("bulkApplyBtn").onclick = () => bulkApply("tagged");
     if ($("bulkInatBtn")) $("bulkInatBtn").onclick = () => inatCreateObservationFromSelection();
-    if ($("bulkSkipBtn")) $("bulkSkipBtn").onclick = () => bulkApply("skipped");
-    if ($("bulkUndetBtn")) $("bulkUndetBtn").onclick = () => bulkApply("undetermined");
+    if ($("bulkUndetBtn")) $("bulkUndetBtn").onclick = () => bulkApply("nontaxa");
     if ($("bulkDeleteBtn")) $("bulkDeleteBtn").onclick = () => bulkApply("deleted");
     if ($("bulkClearBtn")) $("bulkClearBtn").onclick = clearMultiSel;
 
@@ -3675,6 +3881,7 @@
     S.infoVisible = LS.get("infoVisible", true);
     S.watermark = LS.get("watermark", { enabled: false, text: "", position: "br", font: "sans", sizePct: 2.8 });
     S.perSpeciesFolders = LS.get("perSpeciesFolders", false);
+    S.disabledAttrCols = new Set(LS.get("disabledAttrCols", []));
     S.lastApproxLocation = LS.get("lastApproxLocation", null);
     CFG.suggestionWindowMin = LS.get("windowMin", CFG.suggestionWindowMin);
     CFG.cameraClockOffsetHours = LS.get("clockOffset", CFG.cameraClockOffsetHours);

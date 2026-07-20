@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>tagit — caption plant &amp; animal photos in your browser</title>
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Cpath d='M25 6C13 6 7 13 7 22c0 1 0 2 .3 3C10 18 16 14 22 12c-5 3-9 7-11 14 10 1 16-6 16-16 0-2 0-3-2-4z' fill='%232f6b47'/%3E%3C/svg%3E">
-  <link rel="stylesheet" href="styles.css?v=19">
+  <link rel="stylesheet" href="styles.css?v=20">
   <link rel="stylesheet" href="vendor/leaflet.css">
   <script>
     // Set theme before first paint to avoid a flash.
@@ -106,7 +106,7 @@
 
           <label class="field-label">Tagging old photos?</label>
           <button id="inatScreenBtn" class="btn btn-inat full">Screen collection for already-posted photos</button>
-          <p class="hint" style="margin:0">Checks your iNaturalist account near every photo's date/time (any status — untouched, labelled, skipped, deleted…), compares the images, and lets you confirm matches.</p>
+          <p class="hint" style="margin:0">Checks your iNaturalist account near every photo's date/time (any status — untouched, tagged, deleted, non-taxon), compares the images, and lets you confirm matches.</p>
 
           <label class="field-label">API token <span id="inatStatus" class="tag"></span></label>
           <p class="hint">Click the link (sign in if asked), copy <em>everything</em> the page shows, and paste it below — tagit extracts the token and checks it automatically. Used only from your browser; expires after ~24&nbsp;hours.
@@ -135,7 +135,7 @@
         <button type="button" class="modal-close" data-close="inatScreenConfigModal" aria-label="Close">×</button>
       </div>
       <div class="fold-sec-body">
-        <p class="hint">Looks through your iNaturalist observations for anything near each photo's date &amp; time — <strong>any status</strong>, including ones you've already labelled, skipped or deleted — then compares the images so you can confirm matches side-by-side. Confirmed matches are captioned, keyworded and linked automatically.</p>
+        <p class="hint">Looks through your iNaturalist observations for anything near each photo's date &amp; time — <strong>any status</strong>, including ones you've already tagged or deleted — then compares the images so you can confirm matches side-by-side. Confirmed matches are captioned, keyworded and linked automatically.</p>
         <label class="field-label" for="screenWindowMin">Match window (± minutes)</label>
         <input type="number" id="screenWindowMin" class="input small" min="1" max="120" step="1" value="5">
         <button id="screenStartBtn" class="btn btn-primary full">Start screening</button>
@@ -188,19 +188,16 @@
           <button id="nextBtn" class="btn">Next <span class="ic-t">→</span></button>
           <button id="rotateBtn" class="btn">Rotate 90°</button>
           <button id="undoBtn" class="btn">Undo</button>
-          <button id="skipBtn" class="btn">Skip</button>
-          <button id="undetBtn" class="btn">Can’t determine</button>
         </div>
+        <button id="undetBtn" class="btn full">Not a taxon <span class="sub">→ _nontaxa</span></button>
         <button id="deleteBtn" class="btn btn-danger full">Delete <span class="sub">→ _deleted</span></button>
 
         <div class="field-label">Show</div>
         <div id="statusFilter" class="segmented">
           <label class="seg"><input type="checkbox" value="untouched"><span>Untouched</span></label>
-          <label class="seg seg-preexisting" hidden><input type="checkbox" value="preexisting"><span>Already tagged</span></label>
-          <label class="seg"><input type="checkbox" value="labelled"><span>Labelled</span></label>
-          <label class="seg"><input type="checkbox" value="skipped"><span>Skipped</span></label>
-          <label class="seg"><input type="checkbox" value="undetermined"><span>Undetermined</span></label>
+          <label class="seg"><input type="checkbox" value="tagged"><span>Tagged</span></label>
           <label class="seg"><input type="checkbox" value="deleted"><span>Deleted</span></label>
+          <label class="seg"><input type="checkbox" value="nontaxa"><span>Non-taxon</span></label>
         </div>
       </div>
     </div>
@@ -314,19 +311,23 @@
           </div>
         </div>
 
+        <div class="field-label" style="margin-top:14px">Keyword attributes</div>
+        <p class="hint">Extra columns from the active taxonomies above — a higher rank like order or class, a status flag, or anything else — can each be included as a keyword or left out. Unticked ones are never added, even if a taxon has a value for them. Species, family and genus keywords always sort alphabetically within their own group.</p>
+        <div id="attrColsList" class="tx-list"></div>
+
         <button id="exportCsvBtn" class="btn btn-ghost full">Export photo list as CSV</button>
         <p class="hint" style="margin:6px 0 10px">Filename, status, caption, keywords, date, GPS and iNaturalist link for every photo currently loaded — for spreadsheets or archives.</p>
 
         <button id="refreshKeywordsBtn" class="btn btn-ghost full">Refresh captions &amp; keywords for already-captioned photos</button>
-        <p class="hint" style="margin:6px 0 0">Re-derives species/genus/family/attribute keywords (always in that order) from the taxonomies above for every photo that already has a caption — and fixes captions missing their family, e.g. a determination like "Centaurea" or "Taraxacum officinale aggr." that didn't match the taxonomy exactly the first time. Handy after editing a taxonomy or adding new attribute columns. Keywords you added by hand are kept, and a family already in a caption is never erased if no match is found; you'll see exactly what would change before anything is written.</p>
+        <p class="hint" style="margin:6px 0 0">Re-derives keywords from the taxonomies above for every photo that already has a caption — species, then family, then genus, then anything else, alphabetically within each group — and fixes captions missing their family, e.g. a determination like "Centaurea" or "Taraxacum officinale aggr." that didn't match the taxonomy exactly the first time. Handy after editing a taxonomy, adding new attribute columns, or changing which attributes are included above. Keywords you added by hand are kept, and a family already in a caption is never erased if no match is found; you'll see exactly what would change before anything is written.</p>
 
         <h4>Observation log <span id="obsStatus" class="tag"></span></h4>
         <p class="hint">CSV/TSV with a taxon column and a date column (<code>date_start</code>/<code>datetime</code>). Powers the time-based suggestions.</p>
         <input type="file" id="obsFile" accept=".csv,.tsv,.txt">
 
         <h4>Folder organization</h4>
-        <label class="check"><input type="checkbox" id="perSpeciesFolders"><span>Sort labelled photos into one folder per species (within <code>_labelled</code>)</span></label>
-        <p class="hint" style="margin:6px 0 0">Off by default — everything saved as labelled goes straight into <code>_labelled</code>. Turn this on to instead get <code>_labelled/Genus species/</code> subfolders, one per taxon. Applies to photos saved from now on; existing files aren't reorganized.</p>
+        <label class="check"><input type="checkbox" id="perSpeciesFolders"><span>Sort tagged photos into one folder per species (within <code>_tagged</code>)</span></label>
+        <p class="hint" style="margin:6px 0 0">Off by default — everything saved as tagged goes straight into <code>_tagged</code>. Turn this on to instead get <code>_tagged/Genus species/</code> subfolders, one per taxon. Applies to photos saved from now on; existing files aren't reorganized.</p>
 
         <h4>Settings</h4>
         <div class="settings-grid">
@@ -378,15 +379,16 @@
         <h4>How it works</h4>
         <ul class="hint">
           <li>Captions are written into the three fields Apple Photos reads: IPTC Caption-Abstract, XMP dc:description, EXIF ImageDescription.</li>
-          <li>Save → <code>_labelled</code>; Skip → <code>_skipped</code>; Can’t determine → <code>_undetermined</code> (“Indet.”); Delete → <code>_deleted</code>.</li>
+          <li>Save → <code>_tagged</code>; Not a taxon → <code>_nontaxa</code> (“Indet.”); Delete → <code>_deleted</code>.</li>
           <li>Full folder editing works in Chrome/Edge/Brave/Arc. Safari/Firefox: drag in and download copies.</li>
           <li>This build handles <strong>JPEG</strong> only — RAW/HEIC need the desktop version.</li>
           <li><strong>Connect to Photos</strong> tags photos straight from your Apple Photos library via a small local helper app — captions/keywords are written with Photos' own scripting interface, so nothing is exported or re-imported. Rotate and watermark aren't available for these photos yet.</li>
-          <li><strong>Filmstrip</strong>: the thumbnail row above the photo jumps anywhere with a click; shift-click selects a range and Cmd/Ctrl-click toggles single photos for bulk actions (apply one caption, skip, delete, or post them all as ONE grouped iNaturalist observation — one Undo reverts a batch caption/skip/delete).</li>
+          <li><strong>Filmstrip</strong>: the thumbnail row above the photo jumps anywhere with a click; shift-click selects a range and Cmd/Ctrl-click toggles single photos for bulk actions (apply one caption, mark as non-taxon, delete, or post them all as ONE grouped iNaturalist observation — one Undo reverts a batch).</li>
           <li><strong>Rating</strong>: press <strong>1–5</strong> to rate the current photo (★ shows in its keywords, including in Apple Photos' own search) — <strong>5</strong> also marks it a Photos favorite. <strong>0</strong> clears a rating. Click the star row in the photo info to rate with the mouse instead.</li>
+          <li><strong>Characteristics</strong>: tick any that apply — Dormant, Flowering, Fruiting, Detail, Habitat — each becomes a plain, visible keyword on the photo. Any number can be checked at once, and they're applied together with the caption when you save.</li>
           <li><strong>iNaturalist</strong>: paste a token in the iNaturalist tab, then click <em>Identify with iNaturalist</em> to get AI suggestions (with confidence %) for the current photo (uses its GPS &amp; date).</li>
           <li><strong>Map</strong>: photos with GPS get a <em>Show map</em> control in the photo info; it appears as a small preview in the photo's bottom-right corner — click it to enlarge.</li>
-          <li>Keys: ← → navigate · 1–5 rate · 6–9 pick a suggestion · Delete discard (only with nothing selected). Just start typing a letter anywhere to jump into the search box — Rotate/Undo/Can’t-determine/Same-as-previous are one click away as buttons instead of shortcut letters, so a letter key always means “start a search.”</li>
+          <li>Keys: ← → navigate · 1–5 rate · 6–9 pick a suggestion · Delete discard (only with nothing selected). Just start typing a letter anywhere to jump into the search box — Rotate/Undo/Not-a-taxon/Same-as-previous are one click away as buttons instead of shortcut letters, so a letter key always means “start a search.”</li>
           <li>In the search box, type an abbreviation of each word — e.g. <code>dro rot</code> for <em>Drosera rotundifolia</em>, <code>dact fuch</code> for <em>Dactylorhiza maculata</em> subsp. <em>fuchsii</em> — then press <strong>Enter</strong> to save that match and move to the next photo in one step. Clicking a suggestion/recently-used chip instead just adds it to the current determination without saving.</li>
         </ul>
       </div>
@@ -458,6 +460,14 @@
         <label class="check">
           <input type="checkbox" id="cfBox"><span>Uncertain determination (cf.)</span>
         </label>
+        <label class="field-label">Characteristics</label>
+        <div id="charTags" class="segmented">
+          <label class="seg"><input type="checkbox" value="Dormant"><span>Dormant</span></label>
+          <label class="seg"><input type="checkbox" value="Flowering"><span>Flowering</span></label>
+          <label class="seg"><input type="checkbox" value="Fruiting"><span>Fruiting</span></label>
+          <label class="seg"><input type="checkbox" value="Detail"><span>Detail</span></label>
+          <label class="seg"><input type="checkbox" value="Habitat"><span>Habitat</span></label>
+        </div>
         <label class="field-label">Recently used</label>
         <div id="recent" class="btn-area recent"></div>
         <label class="field-label" for="captionBox">Caption to save</label>
@@ -487,7 +497,7 @@
      </div><!-- /.panel-scroll -->
 
       <div class="panel-foot">
-        <div class="progress"><div id="barDone" class="bar-done"></div><div id="barPre" class="bar-pre"></div><div id="barUndet" class="bar-undet"></div></div>
+        <div class="progress"><div id="barDone" class="bar-done"></div><div id="barNontaxa" class="bar-nontaxa"></div></div>
         <div id="progressText" class="progress-text"></div>
       </div>
     </aside>
@@ -498,8 +508,7 @@
         <span id="bulkCount"></span>
         <button id="bulkApplyBtn" class="btn">Apply caption to all</button>
         <button id="bulkInatBtn" class="btn btn-inat">Post as one iNat observation</button>
-        <button id="bulkSkipBtn" class="btn">Skip</button>
-        <button id="bulkUndetBtn" class="btn">Can’t determine</button>
+        <button id="bulkUndetBtn" class="btn">Not a taxon</button>
         <button id="bulkDeleteBtn" class="btn btn-danger">Delete</button>
         <button id="bulkClearBtn" class="btn btn-ghost">Clear</button>
       </div>
@@ -534,7 +543,7 @@
   </main>
 
   <script src="metadata.js?v=13"></script>
-  <script src="app.js?v=24"></script>
+  <script src="app.js?v=29"></script>
   <script>
     (() => {
       const root = document.documentElement;
