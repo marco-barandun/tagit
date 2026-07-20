@@ -487,6 +487,15 @@ select.input {
 .seg input:checked + span { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); font-weight: 550; }
 .seg input:focus-visible + span { outline: 2px solid var(--accent); outline-offset: 2px; }
 
+/* Characteristics: five short tags kept on a single row, sharing the width
+   equally (unlike the status filter above, which is free to wrap). */
+#charTags { flex-wrap: nowrap; gap: 4px; }
+#charTags .seg { flex: 1 1 0; min-width: 0; }
+#charTags .seg span {
+  display: block; text-align: center; padding: 5px 4px; font-size: 11px;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+
 /* progress */
 .progress { display: flex; height: 8px; margin: 14px 0 8px; border-radius: 999px; overflow: hidden; background: var(--hair); }
 .bar-done { height: 100%; width: 0; background: linear-gradient(90deg, var(--accent), var(--done)); transition: width .3s ease; }
@@ -515,6 +524,28 @@ select.input {
   border-radius: 50%; border: 1.5px solid rgba(0, 0, 0, 0.4);
   background: transparent;
 }
+/* Plain-click selection checkbox, top-left of each thumbnail. Always faintly
+   visible so grouping is discoverable; fills in when the photo is selected. */
+.film-check {
+  position: absolute; top: 3px; left: 3px; width: 16px; height: 16px;
+  border-radius: 4px; border: 1.5px solid rgba(255, 255, 255, 0.75);
+  background: rgba(0, 0, 0, 0.4); box-shadow: 0 1px 2px rgba(0, 0, 0, 0.5);
+  cursor: pointer; opacity: 0.65; transition: opacity .12s ease, background .12s ease;
+}
+.film-cell:hover .film-check { opacity: 1; }
+.film-check::after {
+  content: "✓"; position: absolute; inset: 0; display: flex;
+  align-items: center; justify-content: center;
+  font-size: 12px; line-height: 1; color: #fff; opacity: 0;
+}
+.film-cell.multisel .film-check {
+  opacity: 1; background: #3b7cc4; border-color: #3b7cc4;
+}
+.film-cell.multisel .film-check::after { opacity: 1; }
+.filmstrip-hint {
+  flex: none; margin: 0 0 6px; font-size: 12px; color: var(--muted); line-height: 1.4;
+}
+.filmstrip-hint[hidden] { display: none; }
 .bulk-bar {
   display: flex; align-items: center; gap: 8px; flex-wrap: wrap; flex: none;
   padding: 8px 12px; margin-bottom: 8px;

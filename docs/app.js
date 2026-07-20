@@ -66,6 +66,7 @@
     selAnchor: null,       // anchor index for shift-click ranges
     metaToken: 0,          // invalidates in-flight background metadata reads on reload
     warmToken: 0,          // invalidates in-flight background image preloading on reload
+    apMetaLoading: false,  // true while Apple Photos captions/keywords are still streaming in (image warmup waits for this)
     inatToken: "",         // iNaturalist API token (browser-only)
     inatResults: [],       // last CV suggestions
     inatResultsFor: null,  // photo the CV suggestions belong to
@@ -1925,9 +1926,17 @@
     // main reason opening a big album "took a lot to load"), so they stream
     // in the background here too, just via a different loader.
     if (photos.length) {
-      if (S.mode === "applephotos") loadApplePhotosMetaInBackground(photos);
-      else loadMetaInBackground(photos);
-      warmupPreviews(photos);
+      if (S.mode === "applephotos") {
+        // Image warmup is deliberately NOT started here — the helper serves
+        // every request on a single serial queue, so prefetching full-res
+        // images (a slow iCloud fetch each) would starve /photos/meta and the
+        // captions/keywords/status wouldn't appear. loadApplePhotosMetaInBackground
+        // kicks off the image warmup itself once the meta load has finished.
+        loadApplePhotosMetaInBackground(photos);
+      } else {
+        loadMetaInBackground(photos);
+        warmupPreviews(photos);   // local files: cheap, no serial-helper contention
+      }
     }
   }
 
@@ -1951,9 +1960,10 @@
   // kept warm (warmApplePhotosWindow), and it follows the current photo as
   // the user moves (re-invoked from render), with evictFarPreviews dropping
   // anything left far behind.
+  // Local files only (fs/download) — Apple Photos warming goes through
+  // warmApplePhotosWindow instead (bounded, and gated on meta load).
   async function warmupPreviews(photos) {
     const token = ++S.warmToken;
-    if (S.mode === "applephotos") { warmApplePhotosWindow(); return; }
     const order = photos.filter((p) => p !== S.photos[S.idx]);
     let next = 0;
     async function worker() {
@@ -1970,9 +1980,12 @@
 
   // Warm the next few visible photos after the current one. getFile() dedups
   // in-flight fetches, so calling this on every navigation is cheap — it only
-  // kicks off downloads for upcoming photos not already loading.
+  // kicks off downloads for upcoming photos not already loading. It stays out
+  // of the way while the meta load is running (S.apMetaLoading): the helper's
+  // request queue is serial, so prefetching images then would delay the
+  // captions/keywords/status the user actually needs first.
   function warmApplePhotosWindow() {
-    if (S.mode !== "applephotos") return;
+    if (S.mode !== "applephotos" || S.apMetaLoading) return;
     const vis = visibleIdx();
     const pos = vis.indexOf(S.idx);
     if (pos < 0) return;
@@ -2041,6 +2054,7 @@
   // correctly cancels whichever background load was previously running.
   async function loadApplePhotosMetaInBackground(photos) {
     const token = ++S.metaToken;
+    S.apMetaLoading = true;   // hold off image prefetch so it can't starve these meta reads
     const BATCH = 30;
     const ids = photos.map((p) => p.assetId);
     const batches = [];
@@ -2082,7 +2096,13 @@
       done += batch.length;
       if (done < ids.length) setBusy(`Reading captions/keywords… ${Math.min(done, ids.length)}/${ids.length}`);
     }
-    if (token === S.metaToken) { setBusy(null); render(); }
+    if (token === S.metaToken) {
+      setBusy(null);
+      // Meta's in — now it's safe to prefetch images around the current photo.
+      S.apMetaLoading = false;
+      render();
+      warmApplePhotosWindow();
+    }
   }
 
   async function collectFrom(dirHandle, status, out, dirKey = null, stats = null) {
@@ -2707,7 +2727,7 @@
     // cells still get built while hidden so they're ready the instant it's
     // switched back on.
     strip.hidden = !S.infoVisible || !vis.length;
-    if (!vis.length) { updateBulkBar(); return; }
+    if (!vis.length) { updateBulkBar(); updateFilmstripHint(); return; }
     filmObserver = new IntersectionObserver((entries) => {
       for (const en of entries) {
         if (!en.isIntersecting) continue;
@@ -2722,12 +2742,23 @@
       img.dataset.idx = i;
       if (p._thumbUrl) img.src = p._thumbUrl;
       const dot = el("span", { className: "film-dot" });
-      const cell = el("button", { type: "button", className: "film-cell", title: p.name }, [img, dot]);
+      // A plain-click checkbox to group photos (for one iNaturalist
+      // observation, or any bulk action) without needing shift/⌘-click —
+      // clicking it toggles selection and stops the cell's own navigate click.
+      const check = el("span", { className: "film-check", title: "Select to group (e.g. one iNaturalist observation for several photos)" });
+      check.onclick = (e) => { e.stopPropagation(); toggleFilmSelect(i); };
+      const cell = el("button", { type: "button", className: "film-cell", title: p.name }, [img, dot, check]);
       cell.dataset.idx = i;
       cell.onclick = (e) => onFilmCellClick(i, e);
       strip.append(cell);
       if (!p._thumbUrl) filmObserver.observe(img);
     }
+    syncFilmstrip();
+  }
+  // Plain-click toggle of a photo's membership in the multi-selection.
+  function toggleFilmSelect(i) {
+    if (S.multiSel.has(i)) S.multiSel.delete(i); else S.multiSel.add(i);
+    S.selAnchor = i;
     syncFilmstrip();
   }
   // Cheap per-render pass: highlight current/selected, refresh status dots,
@@ -2737,7 +2768,7 @@
     if (!strip) { updateBulkBar(); return; }
     const hasCells = strip.children.length > 0;
     strip.hidden = !S.infoVisible || !hasCells;
-    if (!hasCells) { updateBulkBar(); return; }
+    if (!hasCells) { updateBulkBar(); updateFilmstripHint(); return; }
     for (const cell of strip.children) {
       const i = +cell.dataset.idx;
       const p = S.photos[i];
@@ -2751,6 +2782,15 @@
       if (cur) cur.scrollIntoView({ block: "nearest", inline: "nearest" });
     }
     updateBulkBar();
+    updateFilmstripHint();
+  }
+  // The grouping tip shows only when it's actionable: filmstrip visible, at
+  // least two photos to group, and nothing selected yet (once you've started
+  // selecting, the bulk bar's own buttons take over).
+  function updateFilmstripHint() {
+    const hint = $("filmstripHint"), strip = $("filmstrip");
+    if (!hint || !strip) return;
+    hint.hidden = strip.hidden || strip.children.length < 2 || S.multiSel.size > 0;
   }
   function onFilmCellClick(i, e) {
     if (e.shiftKey && S.selAnchor != null) {

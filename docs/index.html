@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>tagit — caption plant &amp; animal photos in your browser</title>
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Cpath d='M25 6C13 6 7 13 7 22c0 1 0 2 .3 3C10 18 16 14 22 12c-5 3-9 7-11 14 10 1 16-6 16-16 0-2 0-3-2-4z' fill='%232f6b47'/%3E%3C/svg%3E">
-  <link rel="stylesheet" href="styles.css?v=20">
+  <link rel="stylesheet" href="styles.css?v=21">
   <link rel="stylesheet" href="vendor/leaflet.css">
   <script>
     // Set theme before first paint to avoid a flash.
@@ -512,8 +512,9 @@
         <button id="bulkDeleteBtn" class="btn btn-danger">Delete</button>
         <button id="bulkClearBtn" class="btn btn-ghost">Clear</button>
       </div>
-      <!-- Thumbnail strip: click to jump, shift-click to select a range,
-           Cmd/Ctrl-click to toggle one photo for bulk actions. -->
+      <!-- Thumbnail strip: click a thumbnail to jump; click its corner ✓ (or
+           shift / Cmd-click) to group photos for a bulk action. -->
+      <p id="filmstripHint" class="filmstrip-hint" hidden>Tip: tick the corner of thumbnails below to group photos — then “Post as one iNaturalist observation”.</p>
       <div id="filmstrip" class="filmstrip" hidden></div>
       <div class="stage">
         <div id="busy" class="busy" style="display:none"></div>
@@ -543,7 +544,7 @@
   </main>
 
   <script src="metadata.js?v=13"></script>
-  <script src="app.js?v=29"></script>
+  <script src="app.js?v=31"></script>
   <script>
     (() => {
       const root = document.documentElement;
