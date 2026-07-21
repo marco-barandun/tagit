@@ -23,6 +23,7 @@
     nontaxaDir: "_nontaxa",
     deletedDir: "_deleted",
     nontaxaCaption: "Indet.",
+    burstGapSec: 12,       // photos this close in time are treated as one burst (same specimen)
   };
   const IMAGE_RE = /\.(jpe?g)$/i;                 // browser build handles JPEG only
   const STATUS_DIRS = {
@@ -48,6 +49,8 @@
     selected: [],          // chosen taxa (chips)
     cf: false,
     charTags: new Set(),   // characteristics checked for the current photo (Dormant, Flowering, …)
+    charTagList: [],       // the customizable set of characteristic names (persisted; defaults to CHAR_TAGS)
+    sticky: false,         // burst mode: keep the determination across Save & next
     recent: [],
     lastCaption: "",
     undo: null,
@@ -81,8 +84,12 @@
   // Checkboxes for what a plant photo shows — plain, visible keywords (like
   // star ratings), any number of which can apply at once. Applied at save
   // time alongside the taxon keywords, so unsaved changes are discarded on
-  // navigation just like the caption and extra-keywords box.
-  const CHAR_TAGS = ["Dormant", "Flowering", "Fruiting", "Detail", "Habitat"];
+  // navigation just like the caption and extra-keywords box. This is only the
+  // DEFAULT set; the live list is S.charTagList, editable in Setup & persisted.
+  const CHAR_TAGS_DEFAULT = ["Dormant", "Flowering", "Fruiting", "Detail", "Habitat"];
+  // The live list the app uses — trimmed, de-blanked view of the (raw,
+  // editable) S.charTagList. Editing UI works on the raw array directly.
+  const charTags = () => S.charTagList.map((s) => s.trim()).filter(Boolean);
 
   // ---- tiny DOM helpers ----------------------------------------------------
   const $ = (id) => document.getElementById(id);
@@ -839,6 +846,12 @@
     const modal = $("inatModal");
     const img = $("inatPhotoImg"), meta = $("inatPhotoMeta");
     if (!modal || modal.hidden || !img || !meta) return;
+    updateInatObsButton();   // reflect any active filmstrip multi-selection
+    // Keep the modal's own thumbnail strip in step — rebuild only when the
+    // visible set/status actually changed (same signature trick as render()).
+    const filmSig = visibleIdx().map((i) => i + S.photos[i].status[0]).join("|");
+    if (filmSig !== S._inatFilmSig) { S._inatFilmSig = filmSig; rebuildInatFilmstrip(); }
+    else syncInatFilmstrip();
     const p = current();
     if (!p) { img.src = ""; meta.innerHTML = ""; meta.hidden = true; resetInatZoom(); return; }
     resetInatZoom();
@@ -860,6 +873,28 @@
       meta.append(el("div", { className: "meta-overlay-kw", textContent: p.keywords.join(" · ") }));
     }
     meta.hidden = !S.infoVisible;
+  }
+  // The iNaturalist tab's "Post observation" button doubles as the group
+  // post: when 2+ photos are selected (tick their corner ✓ in the thumbnail
+  // strip — here in the modal, or in the main filmstrip), it posts them as
+  // ONE observation, same as the bulk bar. Right here is also where the
+  // coordinate-sharing choice lives, so the whole group flow is self-contained.
+  function updateInatObsButton() {
+    const btn = $("inatObsBtn"); if (!btn) return;
+    const n = S.multiSel.size;
+    const note = $("inatGroupNote");
+    if (n >= 2) {
+      btn.textContent = `Post ONE observation · ${n} photos`;
+      if (note) { note.hidden = false; note.textContent = `${n} photos selected — “Post” creates ONE observation with all of them.`; }
+    } else {
+      btn.textContent = "Post observation to iNaturalist";
+      if (note) {
+        // Only worth hinting when there's actually more than one photo to group.
+        const canGroup = visibleIdx().length > 1;
+        note.hidden = !canGroup;
+        note.textContent = canGroup ? "Tick the ✓ on thumbnails to group several photos into one observation." : "";
+      }
+    }
   }
   function updateInatStatus(state) {
     const has = !!(S.inatToken && S.inatToken.trim());
@@ -916,6 +951,10 @@
     else { p.fileHandle = await writeBytesTo(p.parentHandle, p.name, bytes); p.url = null; }
   }
 
+  // Current coordinate-sharing choice from the iNaturalist dropdown. "none"
+  // means attach no location at all; the rest are iNaturalist geoprivacy levels.
+  function inatGeoValue() { return ($("inatGeo") && $("inatGeo").value) || "open"; }
+
   async function inatCreateObservation() {
     const p = current(); if (!p) return;
     const token = requireInatToken();
@@ -929,9 +968,12 @@
     const name = (taxa[0] || "").trim();
     if (!name) { toast("Pick a taxon for this photo first.", "warn"); return; }
     if (p.inatUrl && !confirm("This photo is already linked to an observation. Create another?")) return;
-    const geoLabel = { open: "public", obscured: "obscured", private: "private" }[($("inatGeo") && $("inatGeo").value) || "open"];
+    const geo = inatGeoValue();
+    const attachLoc = geo !== "none";
+    const geoLabel = { open: "public", obscured: "obscured", private: "private" }[geo];
     const hasRealGps = p.lat != null && p.lon != null;
-    const geoNote = hasRealGps ? `Coordinates will be ${geoLabel}.`
+    const geoNote = !attachLoc ? "No location will be attached (you chose not to share coordinates)."
+      : hasRealGps ? `Coordinates will be ${geoLabel}.`
       : (p.approxLat != null ? `No GPS on this photo — using your approximate location (±${fmtRadius(p.approxUncertaintyM)}, ${geoLabel}).`
       : "No location will be attached (no GPS, and no approximate location picked).");
     if (!confirm(`Post an iNaturalist observation for “${name}”?\n${geoNote}\nThis posts to your public iNaturalist account.`)) return;
@@ -944,19 +986,21 @@
         if (tr.ok) { const tj = await tr.json(); taxonId = tj.results && tj.results[0] && tj.results[0].id; }
       } catch { /* still create as a free-text guess */ }
 
-      const geo = ($("inatGeo") && $("inatGeo").value) || "open";
-      const obs = { species_guess: name, geoprivacy: geo };
+      const obs = { species_guess: name };
+      if (attachLoc) {
+        obs.geoprivacy = geo;
+        if (p.lat != null && p.lon != null) {
+          obs.latitude = p.lat; obs.longitude = p.lon;
+        } else if (p.approxLat != null && p.approxLon != null) {
+          // A manually-picked approximate point, not the photo's real GPS —
+          // positional_accuracy tells iNaturalist to show it as an uncertainty
+          // circle rather than a misleadingly precise pin.
+          obs.latitude = p.approxLat; obs.longitude = p.approxLon;
+          obs.positional_accuracy = p.approxUncertaintyM;
+        }
+      }
       if (p.datetime) obs.observed_on_string = fmtDate(p.datetime);
       if (taxonId) obs.taxon_id = taxonId;
-      if (p.lat != null && p.lon != null) {
-        obs.latitude = p.lat; obs.longitude = p.lon;
-      } else if (p.approxLat != null && p.approxLon != null) {
-        // A manually-picked approximate point, not the photo's real GPS —
-        // positional_accuracy tells iNaturalist to show it as an uncertainty
-        // circle rather than a misleadingly precise pin.
-        obs.latitude = p.approxLat; obs.longitude = p.approxLon;
-        obs.positional_accuracy = p.approxUncertaintyM;
-      }
 
       const cr = await fetch("https://api.inaturalist.org/v1/observations", {
         method: "POST", headers: { Authorization: "Bearer " + token, "Content-Type": "application/json" },
@@ -1004,10 +1048,13 @@
 
   // Group version of inatCreateObservation(): the filmstrip's multi-select
   // (shift-click a range, Cmd/Ctrl-click to toggle) feeds this — one
-  // observation, every selected photo attached to it as an
-  // observation_photo, same as picking "add more photos" by hand on
-  // iNaturalist's own site. Every photo in the group is marked "tagged",
-  // same as the single-photo flow, with one combined Undo for the batch.
+  // observation, every selected photo LINKED to it locally, same as picking
+  // "add more photos" by hand on iNaturalist's own site. Every photo in the
+  // group is marked "tagged", same as the single-photo flow, with one
+  // combined Undo for the batch. Which photos actually get their image
+  // uploaded (vs. just linked with no upload — e.g. near-duplicate shots of
+  // the same sighting) is chosen in the picker modal this opens; see
+  // postInatGroupObservation() for the part that actually posts.
   async function inatCreateObservationFromSelection() {
     const targets = [...S.multiSel].sort((a, b) => a - b).map((i) => S.photos[i]).filter(Boolean);
     if (targets.length < 2) return;
@@ -1023,12 +1070,56 @@
     // that actually has real GPS (or, failing that, an approximate location).
     const geoSource = targets.find((p) => p.lat != null && p.lon != null) || targets.find((p) => p.approxLat != null) || targets[0];
     const hasRealGps = geoSource.lat != null && geoSource.lon != null;
-    const geoLabel = { open: "public", obscured: "obscured", private: "private" }[($("inatGeo") && $("inatGeo").value) || "open"];
-    const geoNote = hasRealGps ? `Coordinates will be ${geoLabel} (from “${geoSource.name}”).`
+    const geo = inatGeoValue();
+    const attachLoc = geo !== "none";
+    const geoLabel = { open: "public", obscured: "obscured", private: "private" }[geo];
+    const geoNote = !attachLoc ? "No location will be attached (you chose not to share coordinates)."
+      : hasRealGps ? `Coordinates will be ${geoLabel} (from “${geoSource.name}”).`
       : (geoSource.approxLat != null ? `No GPS — using the approximate location from “${geoSource.name}” (±${fmtRadius(geoSource.approxUncertaintyM)}, ${geoLabel}).`
       : "No location will be attached (none of the selected photos have GPS or an approximate location).");
-    if (!confirm(`Post ONE iNaturalist observation for “${name}” with all ${targets.length} selected photos?\n${geoNote}\nThis posts to your public iNaturalist account.`)) return;
 
+    S._groupUploadTargets = targets;
+    S._groupUploadTaxa = taxa;
+    S._groupUploadName = name;
+    S._groupUploadHasRealGps = hasRealGps;
+    S._groupUploadGeoSource = geoSource;
+    S._groupUploadGeo = geo;   // capture the coordinate choice now so the post matches this note
+
+    $("groupUploadNote").textContent = `One iNaturalist observation for “${name}”, ${targets.length} photo(s). ${geoNote} This posts to your public iNaturalist account.`;
+    const list = $("groupUploadList");
+    list.innerHTML = "";
+    for (const p of targets) {
+      const img = el("img", { alt: "" });
+      thumbUrlFor(p).then((u) => { img.src = u; }).catch(() => {});
+      const cb = el("input", { type: "checkbox", checked: true });
+      const row = el("div", { className: "upload-pick-row" }, [
+        img,
+        el("span", { className: "upload-pick-name", textContent: p.name }),
+        p.inatUrl ? el("span", { className: "upload-pick-already", textContent: "already linked" }) : "",
+        el("label", { className: "check" }, [cb, el("span", { textContent: "Upload" })]),
+      ]);
+      list.append(row);
+    }
+    openModal("inatGroupUploadModal");
+  }
+  function setGroupUploadChecks(value) {
+    $all("#groupUploadList input[type=checkbox]").forEach((cb) => { cb.checked = value; });
+  }
+  function $all(sel, root = document) { return [...root.querySelectorAll(sel)]; }
+
+  // Reads the picker's checkboxes and actually posts — one observation,
+  // every target linked to it locally, only the checked ones uploaded.
+  async function postInatGroupObservation() {
+    const targets = S._groupUploadTargets;
+    if (!targets || !targets.length) { closeModal("inatGroupUploadModal"); return; }
+    const taxa = S._groupUploadTaxa, name = S._groupUploadName;
+    const hasRealGps = S._groupUploadHasRealGps, geoSource = S._groupUploadGeoSource;
+    const rows = $all("#groupUploadList .upload-pick-row");
+    const shouldUpload = new Map(targets.map((p, i) => [p, rows[i].querySelector("input[type=checkbox]").checked]));
+    closeModal("inatGroupUploadModal");
+
+    const token = requireInatToken();
+    if (!token) return;
     setBusy(`Creating iNaturalist observation for ${targets.length} photos…`);
     try {
       let taxonId = null;
@@ -1038,17 +1129,20 @@
         if (tr.ok) { const tj = await tr.json(); taxonId = tj.results && tj.results[0] && tj.results[0].id; }
       } catch { /* still create as a free-text guess */ }
 
-      const geo = ($("inatGeo") && $("inatGeo").value) || "open";
-      const obs = { species_guess: name, geoprivacy: geo };
+      const geo = S._groupUploadGeo || "open";
+      const obs = { species_guess: name };
+      if (geo !== "none") {
+        obs.geoprivacy = geo;
+        if (hasRealGps) {
+          obs.latitude = geoSource.lat; obs.longitude = geoSource.lon;
+        } else if (geoSource.approxLat != null) {
+          obs.latitude = geoSource.approxLat; obs.longitude = geoSource.approxLon;
+          obs.positional_accuracy = geoSource.approxUncertaintyM;
+        }
+      }
       const dateSource = targets.find((p) => p.datetime);
       if (dateSource) obs.observed_on_string = fmtDate(dateSource.datetime);
       if (taxonId) obs.taxon_id = taxonId;
-      if (hasRealGps) {
-        obs.latitude = geoSource.lat; obs.longitude = geoSource.lon;
-      } else if (geoSource.approxLat != null) {
-        obs.latitude = geoSource.approxLat; obs.longitude = geoSource.approxLon;
-        obs.positional_accuracy = geoSource.approxUncertaintyM;
-      }
 
       const cr = await fetch("https://api.inaturalist.org/v1/observations", {
         method: "POST", headers: { Authorization: "Bearer " + token, "Content-Type": "application/json" },
@@ -1071,17 +1165,20 @@
         idx: S.idx, lastCaption: S.lastCaption, recent: [...S.recent],
       };
       const undos = [];
-      let uploaded = 0;
+      let uploaded = 0, toUpload = 0;
       for (const p of targets) {
-        try {
-          const img = await resizeJpeg(await getFile(p), 2048);
-          const fd = new FormData();
-          fd.append("observation_photo[observation_id]", String(obsId));
-          fd.append("file", img, "photo.jpg");
-          await fetch("https://api.inaturalist.org/v1/observation_photos",
-            { method: "POST", headers: { Authorization: "Bearer " + token }, body: fd });
-          uploaded++;
-        } catch (e) { console.warn("photo upload to iNaturalist failed for", p.name, e); }
+        if (shouldUpload.get(p)) {
+          toUpload++;
+          try {
+            const img = await resizeJpeg(await getFile(p), 2048);
+            const fd = new FormData();
+            fd.append("observation_photo[observation_id]", String(obsId));
+            fd.append("file", img, "photo.jpg");
+            await fetch("https://api.inaturalist.org/v1/observation_photos",
+              { method: "POST", headers: { Authorization: "Bearer " + token }, body: fd });
+            uploaded++;
+          } catch (e) { console.warn("photo upload to iNaturalist failed for", p.name, e); }
+        }
         try {
           if (S.mode === "applephotos") {
             await applyStatus(p, "tagged", caption, null, taxa, keywords, null, url);
@@ -1099,12 +1196,15 @@
       clearMultiSel();
       render();
       showInatCelebration(url);
-      if (uploaded < targets.length) {
-        toast(`Uploaded ${uploaded} of ${targets.length} photos to the observation — the rest failed; check iNaturalist.`, "warn", 9000);
+      const skipped = targets.length - toUpload;
+      if (uploaded < toUpload) {
+        toast(`Uploaded ${uploaded} of ${toUpload} chosen photos — the rest failed; check iNaturalist.`, "warn", 9000);
+      } else if (skipped) {
+        toast(`Linked all ${targets.length} photos; uploaded ${uploaded}, skipped ${skipped} by choice.`, "info", 6000);
       }
     } catch (e) {
       console.error(e); toast("Group iNaturalist observation failed: " + (e.message || e) + ".", "warn", 9000);
-    } finally { setBusy(null); }
+    } finally { setBusy(null); S._groupUploadTargets = null; }
   }
 
   // A small moment of celebration when an observation goes live — posting to
@@ -1911,7 +2011,7 @@
     if (S.idx < 0) S.idx = 0;
     S.undo = null;
     S.inatResults = []; S.inatResultsFor = null;
-    S.multiSel.clear(); S.selAnchor = null; S._filmSig = null;
+    S.multiSel.clear(); S.selAnchor = null; S._filmSig = null; S._inatFilmSig = null;
     // Derive the panel state (taxa, cf, caption/keyword boxes, characteristic
     // checkboxes) from the first photo shown — empty for the usual untouched
     // start, populated if the album opens on an already-tagged photo. Crucially
@@ -2702,6 +2802,7 @@
   // A row of thumbnails above the photo: click to jump, shift-click to select
   // a range, Cmd/Ctrl-click to toggle one — selections feed the bulk bar.
   let filmObserver = null;
+  let inatFilmObserver = null;
   async function thumbUrlFor(p) {
     if (p._thumbUrl) return p._thumbUrl;
     if (S.mode === "applephotos") {
@@ -2717,21 +2818,48 @@
     }
     return p._thumbUrl;
   }
-  function rebuildFilmstrip() {
-    const strip = $("filmstrip");
-    if (!strip) return;
-    if (filmObserver) filmObserver.disconnect();
+  // Build the thumbnail cells (with lazy-loaded images and a plain-click
+  // grouping checkbox) into a strip element. Shared by the main filmstrip and
+  // the one inside the iNaturalist modal — both drive the same S.multiSel, so
+  // selecting in either place stays in sync. Returns the strip's own lazy-load
+  // observer (roots differ per strip).
+  // Two consecutive photos belong to the same burst (likely the same specimen)
+  // when both are timestamped within CFG.burstGapSec of each other. Undated
+  // photos never chain. Returns the set of visible indices that BEGIN a burst.
+  function burstStartSet(vis) {
+    const starts = new Set();
+    for (let k = 0; k < vis.length; k++) {
+      if (k === 0) { starts.add(vis[k]); continue; }
+      const a = S.photos[vis[k - 1]].datetime, b = S.photos[vis[k]].datetime;
+      const same = a && b && Math.abs(a - b) <= CFG.burstGapSec * 1000;
+      if (!same) starts.add(vis[k]);
+    }
+    return starts;
+  }
+  // Every visible index in the same burst as `target` (contiguous run where
+  // each adjacent pair is within the gap). Used by ⌥-click to grab a burst.
+  function burstIndicesOf(target) {
+    const vis = visibleIdx();
+    const pos = vis.indexOf(target);
+    if (pos < 0) return [target];
+    const within = (a, b) => {
+      const ta = S.photos[a].datetime, tb = S.photos[b].datetime;
+      return ta && tb && Math.abs(ta - tb) <= CFG.burstGapSec * 1000;
+    };
+    const out = [target];
+    for (let k = pos - 1; k >= 0 && within(vis[k], vis[k + 1]); k--) out.unshift(vis[k]);
+    for (let k = pos + 1; k < vis.length && within(vis[k - 1], vis[k]); k++) out.push(vis[k]);
+    return out;
+  }
+  function buildFilmstripInto(strip) {
     strip.innerHTML = "";
     const vis = visibleIdx();
-    // The strip follows the (i) photo-info toggle, same as the map preview —
-    // cells still get built while hidden so they're ready the instant it's
-    // switched back on.
-    strip.hidden = !S.infoVisible || !vis.length;
-    if (!vis.length) { updateBulkBar(); updateFilmstripHint(); return; }
-    filmObserver = new IntersectionObserver((entries) => {
+    if (!vis.length) return null;
+    const starts = burstStartSet(vis);
+    const obs = new IntersectionObserver((entries) => {
       for (const en of entries) {
         if (!en.isIntersecting) continue;
-        filmObserver.unobserve(en.target);
+        obs.unobserve(en.target);
         const p = S.photos[+en.target.dataset.idx];
         if (p) thumbUrlFor(p).then((u) => { en.target.src = u; }).catch(() => {});
       }
@@ -2747,13 +2875,34 @@
       // clicking it toggles selection and stops the cell's own navigate click.
       const check = el("span", { className: "film-check", title: "Select to group (e.g. one iNaturalist observation for several photos)" });
       check.onclick = (e) => { e.stopPropagation(); toggleFilmSelect(i); };
-      const cell = el("button", { type: "button", className: "film-cell", title: p.name }, [img, dot, check]);
+      const cell = el("button", { type: "button", className: "film-cell", title: p.name + " · ⌥-click to select this burst" }, [img, dot, check]);
       cell.dataset.idx = i;
+      // A gap + divider before every burst except the very first, so runs of
+      // near-duplicate frames read as visual clusters.
+      if (i !== vis[0] && starts.has(i)) cell.classList.add("burst-start");
       cell.onclick = (e) => onFilmCellClick(i, e);
       strip.append(cell);
-      if (!p._thumbUrl) filmObserver.observe(img);
+      if (!p._thumbUrl) obs.observe(img);
     }
+    return obs;
+  }
+  function rebuildFilmstrip() {
+    const strip = $("filmstrip");
+    if (!strip) return;
+    if (filmObserver) filmObserver.disconnect();
+    // The strip follows the (i) photo-info toggle, same as the map preview —
+    // cells still get built while hidden so they're ready the instant it's
+    // switched back on.
+    strip.hidden = !S.infoVisible || !visibleIdx().length;
+    filmObserver = buildFilmstripInto(strip);
     syncFilmstrip();
+  }
+  function rebuildInatFilmstrip() {
+    const strip = $("inatFilmstrip");
+    if (!strip) return;
+    if (inatFilmObserver) inatFilmObserver.disconnect();
+    inatFilmObserver = buildFilmstripInto(strip);
+    syncInatFilmstrip();
   }
   // Plain-click toggle of a photo's membership in the multi-selection.
   function toggleFilmSelect(i) {
@@ -2761,14 +2910,9 @@
     S.selAnchor = i;
     syncFilmstrip();
   }
-  // Cheap per-render pass: highlight current/selected, refresh status dots,
-  // keep the current photo scrolled into view. No DOM rebuilding.
-  function syncFilmstrip() {
-    const strip = $("filmstrip");
-    if (!strip) { updateBulkBar(); return; }
-    const hasCells = strip.children.length > 0;
-    strip.hidden = !S.infoVisible || !hasCells;
-    if (!hasCells) { updateBulkBar(); updateFilmstripHint(); return; }
+  // Update one strip's cells in place (current/selected highlight, status dot,
+  // scroll the current cell into view). No DOM rebuilding.
+  function syncStripCells(strip) {
     for (const cell of strip.children) {
       const i = +cell.dataset.idx;
       const p = S.photos[i];
@@ -2781,8 +2925,30 @@
       const cur = strip.querySelector(".film-cell.current");
       if (cur) cur.scrollIntoView({ block: "nearest", inline: "nearest" });
     }
+  }
+  // Cheap per-render pass: refresh both strips' highlights/dots, the bulk bar,
+  // and the grouping hint — keeps the modal strip in lockstep with the main one.
+  function syncFilmstrip() {
+    const strip = $("filmstrip");
+    if (strip) {
+      const hasCells = strip.children.length > 0;
+      strip.hidden = !S.infoVisible || !hasCells;
+      if (hasCells) syncStripCells(strip);
+    }
+    syncInatFilmstrip();
     updateBulkBar();
     updateFilmstripHint();
+  }
+  // The iNaturalist modal's strip is always visible while the modal is open
+  // (it's the selection tool there) — independent of the (i) info toggle.
+  function syncInatFilmstrip() {
+    const strip = $("inatFilmstrip");
+    if (!strip) return;
+    const modalOpen = $("inatModal") && !$("inatModal").hidden;
+    const hasCells = strip.children.length > 0;
+    strip.hidden = !modalOpen || !hasCells;
+    if (hasCells) syncStripCells(strip);
+    updateInatObsButton();
   }
   // The grouping tip shows only when it's actionable: filmstrip visible, at
   // least two photos to group, and nothing selected yet (once you've started
@@ -2805,9 +2971,19 @@
       if (S.multiSel.has(i)) S.multiSel.delete(i); else S.multiSel.add(i);
       S.selAnchor = i;
       syncFilmstrip();
-    } else {
+    } else if (e.altKey) {
+      // ⌥-click grabs the whole burst this photo belongs to.
+      for (const j of burstIndicesOf(i)) S.multiSel.add(j);
       S.selAnchor = i;
-      S.multiSel.clear();
+      syncFilmstrip();
+    } else {
+      // Plain click just navigates. In the iNaturalist modal's strip the
+      // selection is the whole point (you're browsing to pick which photos to
+      // group), so previewing one must NOT wipe the group — only the main
+      // strip clears, where starting to navigate means the bulk pick is done.
+      const inInatStrip = !!(e.target && e.target.closest && e.target.closest("#inatFilmstrip"));
+      S.selAnchor = i;
+      if (!inInatStrip) S.multiSel.clear();
       S.idx = i;
       syncSelectionFromCaption();
       render();
@@ -2928,6 +3104,22 @@
     const before = visibleIdx().filter((i) => i < S.idx);
     if (before.length) { S.idx = before[before.length - 1]; syncSelectionFromCaption(); render(); return true; }
     return false;
+  }
+  // Skip straight to the next still-untouched photo, wrapping around — for
+  // resuming a half-tagged album without stepping through everything done.
+  function goNextUntouched() {
+    const vis = visibleIdx();
+    if (!vis.length) return;
+    const pos = vis.indexOf(S.idx);
+    const order = pos >= 0 ? [...vis.slice(pos + 1), ...vis.slice(0, pos + 1)] : vis;
+    const next = order.find((i) => S.photos[i].status === "untouched");
+    if (next == null) {
+      toast(S.statusFilter.has("untouched")
+        ? "No untouched photos left — all caught up."
+        : "Untouched photos are hidden by the “Show” filter.", "info", 3800);
+      return;
+    }
+    S.idx = next; syncSelectionFromCaption(); render();
   }
   // ---- end-of-folder recap -------------------------------------------------
   function computeSessionStats() {
@@ -3133,6 +3325,36 @@
     } finally { S._saving = false; setBusy(null); }
   }
 
+  // The whole determination staged in the panel — taxa, cf, characteristics,
+  // and manual keywords. Burst mode snapshots this before a save and restores
+  // it onto the next photo, so a run of frames of the same specimen is just
+  // repeated Save & next with nothing to re-type.
+  function captureDetermination() {
+    return {
+      caption: $("captionBox").value,
+      selected: [...S.selected],
+      cf: S.cf,
+      charTags: new Set(S.charTags),
+      keywords: $("keywordsBox") ? $("keywordsBox").value : "",
+    };
+  }
+  function applyDetermination(d) {
+    S.selected = [...d.selected]; S.cf = d.cf; S.charTags = new Set(d.charTags);
+    if ($("cfBox")) $("cfBox").checked = d.cf;
+    setCaptionBox(d.caption);
+    if ($("keywordsBox")) $("keywordsBox").value = d.keywords;
+    renderCharTags(); renderSelection(); renderFamilyBox();
+  }
+  // Save the current photo and move on. In burst mode the determination is
+  // reloaded onto the photo we land on (staged, not yet written) so it's ready
+  // to Save again immediately.
+  async function saveAndAdvance(caption, taxa) {
+    const det = S.sticky ? captureDetermination() : null;
+    if (await finalizeCaptionSave(current(), caption, taxa)) {
+      advance();
+      if (det && current()) applyDetermination(det);
+    }
+  }
   async function doSave() {
     const caption = $("captionBox").value.trim();
     if (!caption) { toast("Add a taxon or type a caption first.", "info", 2500); return; }
@@ -3140,12 +3362,12 @@
     // correct even after the text was set some other way (copy last, typed by
     // hand, filled from an iNaturalist suggestion) without S.selected being kept
     // in sync.
-    if (await finalizeCaptionSave(current(), caption, taxaFromCaption(caption))) advance();
+    await saveAndAdvance(caption, taxaFromCaption(caption));
   }
   async function instantSave(taxa) {
     const caption = composeForTaxa(taxa);
     if (!caption) return;
-    if (await finalizeCaptionSave(current(), caption, taxa)) advance();
+    await saveAndAdvance(caption, taxa);
   }
   async function saveSameAsPrevious() {
     if (!S.lastCaption) { toast("Nothing saved yet to reuse.", "info", 2500); return; }
@@ -3204,6 +3426,21 @@
     if ($("captionBox")) $("captionBox").value = text;
     if ($("inatCaptionBox")) $("inatCaptionBox").value = text;
   }
+  // Hand-editing "Caption to save" (e.g. erasing a wrongly-picked species and
+  // typing the right one) only ever changed the visible text — S.selected
+  // kept whatever was last picked via search/suggestion, so a later shortcut
+  // (a number key, a suggestion chip, "add to selection") could silently
+  // resurrect the wrong species. Called on blur (not on every keystroke, so
+  // the family-new-taxon popover doesn't flicker while a name is half-typed)
+  // and immediately when the box is cleared, since an empty box unambiguously
+  // means "start over."
+  function syncStateFromCaptionText() {
+    const text = ($("captionBox") && $("captionBox").value.trim()) || "";
+    S.selected = taxaFromCaption(text);
+    S.cf = /cf\./i.test(text);
+    if ($("cfBox")) $("cfBox").checked = S.cf;
+    renderFamilyBox();
+  }
   // Load a photo's existing caption into "Caption to save" (and the selection
   // behind it) — wired to the caption line shown on the photo, so adopting
   // what's already there is one click instead of retyping it.
@@ -3244,7 +3481,7 @@
     // Characteristics have their own checkboxes below, so they're left out of
     // this free-text box — otherwise a checked "Flowering" would also show up
     // here as literal text, which reads as a duplicate rather than a review.
-    const charLower = new Set(CHAR_TAGS.map((t) => t.toLowerCase()));
+    const charLower = new Set(charTags().map((t) => t.toLowerCase()));
     if ($("keywordsBox")) {
       $("keywordsBox").value = manualKeywordsFromPhoto(p).filter((k) => !charLower.has(k.toLowerCase())).join(", ");
     }
@@ -3258,13 +3495,58 @@
   }
   function syncCharTagsFromPhoto(p) {
     const kws = new Set((p ? p.keywords : []).map((k) => k.toLowerCase()));
-    S.charTags = new Set(CHAR_TAGS.filter((t) => kws.has(t.toLowerCase())));
+    S.charTags = new Set(charTags().filter((t) => kws.has(t.toLowerCase())));
     renderCharTags();
   }
   function renderCharTags() {
     const box = $("charTags");
     if (!box) return;
     for (const input of box.querySelectorAll("input[type=checkbox]")) input.checked = S.charTags.has(input.value);
+  }
+  // Rebuild the determination panel's characteristic checkboxes from the
+  // (customizable) S.charTagList — called at boot and whenever the list is
+  // edited in Setup. Preserves which of the still-existing tags are checked.
+  function buildCharTagsRow() {
+    const box = $("charTags");
+    if (!box) return;
+    box.innerHTML = "";
+    for (const name of charTags()) {
+      const cb = el("input", { type: "checkbox", value: name });
+      cb.checked = S.charTags.has(name);
+      box.append(el("label", { className: "seg" }, [cb, el("span", { textContent: name })]));
+    }
+    // Hide the whole row (and its label) when the user has cleared the list.
+    const label = box.previousElementSibling;
+    const empty = !charTags().length;
+    box.hidden = empty;
+    if (label && label.classList.contains("field-label")) label.hidden = empty;
+  }
+  // Setup: edit the customizable characteristic list (rename / reorder / remove).
+  function persistCharTags() {
+    LS.set("charTagList", charTags());   // store the cleaned view
+    buildCharTagsRow();                  // reflect live in the determination panel
+  }
+  function moveCharTag(i, dir) {
+    const j = i + dir, t = S.charTagList;
+    if (j < 0 || j >= t.length) return;
+    [t[i], t[j]] = [t[j], t[i]];
+    persistCharTags(); renderCharTagEditor();
+  }
+  function renderCharTagEditor() {
+    const box = $("charTagEditor");
+    if (!box) return;
+    box.innerHTML = "";
+    S.charTagList.forEach((name, i) => {
+      const input = el("input", { className: "input small", value: name, placeholder: "Name…" });
+      input.addEventListener("input", () => { S.charTagList[i] = input.value; persistCharTags(); });
+      const up = el("button", { type: "button", className: "tag-mini", textContent: "↑", title: "Move up" });
+      up.onclick = () => moveCharTag(i, -1);
+      const down = el("button", { type: "button", className: "tag-mini", textContent: "↓", title: "Move down" });
+      down.onclick = () => moveCharTag(i, 1);
+      const del = el("button", { type: "button", className: "tag-mini tag-del", textContent: "×", title: "Remove" });
+      del.onclick = () => { S.charTagList.splice(i, 1); persistCharTags(); renderCharTagEditor(); };
+      box.append(el("div", { className: "tag-row" }, [input, up, down, del]));
+    });
   }
   function updateCaptionBox() {
     setCaptionBox(composeForTaxa(S.selected));
@@ -3292,7 +3574,7 @@
       $("statusCorner").textContent = ""; $("statusCorner").hidden = true;
       renderSuggestions(); renderRecent(); renderSelection();
       renderInat(); renderPhotoControls(); renderInatPhotoStage(); renderApproxLocationBox();
-      S._filmSig = null; rebuildFilmstrip();
+      S._filmSig = null; S._inatFilmSig = null; rebuildFilmstrip();
       return;
     }
     // preview
@@ -3484,7 +3766,7 @@
   }
   let resetInatZoom = () => {};
   function setupInatZoom() {
-    const stage = document.querySelector(".inat-stage");
+    const stage = document.querySelector(".inat-stage-photo");
     const img = $("inatPhotoImg");
     if (stage && img) resetInatZoom = wireZoom(img, stage);
   }
@@ -3607,26 +3889,32 @@
     $("saveBtn").onclick = doSave;
     $("copyLastBtn").onclick = saveSameAsPrevious;
     if ($("inatSaveBtn")) $("inatSaveBtn").onclick = doSave;
+    if ($("stickyBox")) {
+      $("stickyBox").checked = S.sticky;
+      document.body.classList.toggle("sticky-on", S.sticky);
+      $("stickyBox").addEventListener("change", (e) => toggleSticky(e.target.checked));
+    }
 
     // Keep the sidebar caption box and the iNaturalist tab's copy of it in sync
-    // when either is edited by hand.
+    // when either is edited by hand. Also resync S.selected/cf/family the
+    // moment the box is cleared (unambiguous "start over"), and again on
+    // blur once a full edit is done — see syncStateFromCaptionText().
     $("captionBox").addEventListener("input", (e) => {
       if ($("inatCaptionBox")) $("inatCaptionBox").value = e.target.value;
+      if (!e.target.value.trim()) syncStateFromCaptionText();
     });
+    $("captionBox").addEventListener("blur", syncStateFromCaptionText);
     if ($("inatCaptionBox")) $("inatCaptionBox").addEventListener("input", (e) => {
       $("captionBox").value = e.target.value;
+      if (!e.target.value.trim()) syncStateFromCaptionText();
     });
+    if ($("inatCaptionBox")) $("inatCaptionBox").addEventListener("blur", syncStateFromCaptionText);
 
     // back to the setup page (taxonomies, iNaturalist, watermark, settings)
     $("setupBtn").onclick = () => openModal("setupModal");
     $("helpBtn").onclick = () => openModal("helpModal");
 
     // toggle the photo-info panel (map / date / time / caption / keywords)
-    const toggleInfoVisible = () => {
-      S.infoVisible = !S.infoVisible;
-      LS.set("infoVisible", S.infoVisible);
-      applyInfoVisibility();
-    };
     $("infoToggleBtn").onclick = toggleInfoVisible;
     if ($("inatInfoToggleBtn")) $("inatInfoToggleBtn").onclick = toggleInfoVisible;
 
@@ -3697,6 +3985,7 @@
     });
     $("prevBtn").onclick = goPrev;
     $("nextBtn").onclick = goNext;
+    if ($("nextUntouchedBtn")) $("nextUntouchedBtn").onclick = goNextUntouched;
     $("rotateBtn").onclick = rotateCurrent;
     $("undoBtn").onclick = doUndo;
     $("undetBtn").onclick = markNontaxa;
@@ -3736,6 +4025,11 @@
     if ($("bulkUndetBtn")) $("bulkUndetBtn").onclick = () => bulkApply("nontaxa");
     if ($("bulkDeleteBtn")) $("bulkDeleteBtn").onclick = () => bulkApply("deleted");
     if ($("bulkClearBtn")) $("bulkClearBtn").onclick = clearMultiSel;
+
+    // group iNat upload picker (which selected photos actually get their image sent)
+    if ($("groupUploadConfirmBtn")) $("groupUploadConfirmBtn").onclick = () => postInatGroupObservation();
+    if ($("groupUploadAllBtn")) $("groupUploadAllBtn").onclick = () => setGroupUploadChecks(true);
+    if ($("groupUploadNoneBtn")) $("groupUploadNoneBtn").onclick = () => setGroupUploadChecks(false);
 
     // observation log
     $("obsFile").addEventListener("change", async (e) => {
@@ -3779,7 +4073,7 @@
     // iNaturalist
     $("inatAskBtn").onclick = inatIdentify;
     $("inatCheckBtn").onclick = inatVerify;
-    $("inatObsBtn").onclick = inatCreateObservation;
+    $("inatObsBtn").onclick = () => (S.multiSel.size >= 2 ? inatCreateObservationFromSelection() : inatCreateObservation());
     $("inatSyncBtn").onclick = inatSyncObservations;
 
     // Screen an old collection for photos already posted to iNaturalist
@@ -3844,11 +4138,18 @@
       setTimeout(() => { if ((S.inatToken || "").length > 40) inatVerify(); }, 50);
     });
 
+    // characteristics editor
+    renderCharTagEditor();
+    if ($("charTagAddBtn")) $("charTagAddBtn").onclick = () => { S.charTagList.push(""); renderCharTagEditor(); const rows = $("charTagEditor").querySelectorAll("input"); if (rows.length) rows[rows.length - 1].focus(); };
+    if ($("charTagResetBtn")) $("charTagResetBtn").onclick = () => { S.charTagList = [...CHAR_TAGS_DEFAULT]; persistCharTags(); renderCharTagEditor(); };
+
     // settings
     $("windowMin").value = CFG.suggestionWindowMin;
     $("clockOffset").value = CFG.cameraClockOffsetHours;
+    if ($("burstGap")) $("burstGap").value = CFG.burstGapSec;
     $("windowMin").addEventListener("change", (e) => { CFG.suggestionWindowMin = +e.target.value || 5; LS.set("windowMin", CFG.suggestionWindowMin); render(); });
     $("clockOffset").addEventListener("change", (e) => { CFG.cameraClockOffsetHours = +e.target.value || 0; LS.set("clockOffset", CFG.cameraClockOffsetHours); });
+    if ($("burstGap")) $("burstGap").addEventListener("change", (e) => { CFG.burstGapSec = Math.max(0, +e.target.value || 12); LS.set("burstGapSec", CFG.burstGapSec); S._filmSig = null; S._inatFilmSig = null; render(); });
   }
 
   function wireDropzone() {
@@ -3862,30 +4163,135 @@
     });
   }
 
+  // Toggle the photo-info overlay (map / date / time / caption / keywords /
+  // filmstrip). Shared by the (i) buttons and the Alt+I shortcut.
+  function toggleInfoVisible() {
+    S.infoVisible = !S.infoVisible;
+    LS.set("infoVisible", S.infoVisible);
+    applyInfoVisibility();
+  }
+
+  // Alt/Option + a physical key → action shortcut. Keyed on e.code (the
+  // physical key) rather than e.key because on macOS Option+letter composes a
+  // different character (Option+R → "®", Option+C → "ç", Option+N → dead key),
+  // so e.key can't be relied on for these. These work anywhere — even while
+  // typing in the search box — since Alt+letter is never normal text entry.
+  function altShortcut(code) {
+    switch (code) {
+      case "KeyR": rotateCurrent(); return true;
+      case "KeyU": doUndo(); return true;
+      case "KeyN": markNontaxa(); return true;
+      case "KeyS": saveSameAsPrevious(); return true;
+      case "KeyD": discardCurrent(); return true;
+      case "KeyI": toggleInfoVisible(); return true;
+      case "KeyJ": goNextUntouched(); return true;
+      case "KeyB": toggleSticky(); return true;
+      case "KeyC": {
+        const cb = $("cfBox");
+        if (cb) { cb.checked = !cb.checked; S.cf = cb.checked; updateCaptionBox(); }
+        return true;
+      }
+    }
+    return false;
+  }
+  function toggleSticky(force) {
+    S.sticky = force != null ? force : !S.sticky;
+    LS.set("sticky", S.sticky);
+    if ($("stickyBox")) $("stickyBox").checked = S.sticky;
+    document.body.classList.toggle("sticky-on", S.sticky);
+    toast(S.sticky ? "Burst mode on — determination stays loaded after each save." : "Burst mode off.", "info", 2600);
+  }
+  const SHORTCUTS = [
+    { group: "Navigate", items: [
+      ["← / →", "Previous / next photo"],
+      ["⌥J", "Jump to next untouched"],
+      ["type a letter", "Jump into the species search"],
+      ["Enter (in search)", "Save the matched taxon & go next"],
+    ] },
+    { group: "Rate & suggest", items: [
+      ["1 – 5", "Rate the photo (5 also favorites it in Photos)"],
+      ["0", "Clear the rating"],
+      ["6 – 9", "Pick a time-based suggestion"],
+    ] },
+    { group: "Actions  (⌥ / Alt + letter)", items: [
+      ["⌥S", "Same as previous"],
+      ["⌥B", "Toggle burst mode"],
+      ["⌥R", "Rotate 90°"],
+      ["⌥U", "Undo"],
+      ["⌥N", "Not a taxon"],
+      ["⌥D", "Delete"],
+      ["⌥C", "Toggle “cf.” (uncertain)"],
+      ["⌥I", "Show / hide photo info"],
+    ] },
+    { group: "Select & group  (filmstrip)", items: [
+      ["click ✓", "Add a photo to the group"],
+      ["⌥-click", "Select the whole burst"],
+      ["Shift-click", "Select a range"],
+      ["⌘ / Ctrl-click", "Toggle one photo"],
+      ["Delete", "Discard current (with nothing selected)"],
+    ] },
+    { group: "Anywhere", items: [
+      ["?", "This shortcuts card"],
+      ["Esc", "Close a dialog · clear a selection"],
+    ] },
+  ];
+  function renderShortcuts() {
+    const box = $("shortcutsList"); if (!box) return;
+    box.innerHTML = "";
+    for (const g of SHORTCUTS) {
+      const sec = el("div", { className: "shortcuts-group" });
+      sec.append(el("div", { className: "shortcuts-group-title", textContent: g.group }));
+      for (const [keys, label] of g.items) {
+        sec.append(el("div", { className: "shortcuts-row" }, [
+          el("kbd", { textContent: keys }),
+          el("span", { className: "shortcuts-label", textContent: label }),
+        ]));
+      }
+      box.append(sec);
+    }
+  }
+  function toggleShortcuts() {
+    const m = $("shortcutsModal"); if (!m) return;
+    if (m.hidden) { renderShortcuts(); openModal("shortcutsModal"); }
+    else closeModal("shortcutsModal");
+  }
+
   function wireKeyboard() {
     document.addEventListener("keydown", (e) => {
-      const tag = (e.target.tagName || "").toLowerCase();
-      if (tag === "input" || tag === "textarea" || e.target.isContentEditable) return;
+      // "?" opens/closes the shortcuts card from anywhere (even with no photos
+      // loaded, and even over its own dialog) — as long as you're not typing.
+      const typing = (() => {
+        const t = (e.target.tagName || "").toLowerCase();
+        return t === "input" || t === "textarea" || e.target.isContentEditable;
+      })();
+      if (e.key === "?" && !typing) { e.preventDefault(); toggleShortcuts(); return; }
       if (!S.photos.length) return;
       // Page-level shortcuts stay off while a dialog is open (Setup, Help,
-      // Navigate & act, …) — otherwise a stray letter typed while focus sits
-      // on a button inside one yanks focus to the taxon search box hidden
-      // behind it, and arrows/digits/Delete would act on the background
-      // photo while you're mid-dialog. The one deliberate exception is the
-      // iNaturalist tab: it IS a photo-tagging surface, so navigation and
-      // suggestion shortcuts keep working there (letters still don't grab
-      // the search box, which is hidden behind it).
+      // Navigate & act, …). The one deliberate exception is the iNaturalist
+      // tab: it IS a photo-tagging surface, so shortcuts keep working there.
       const openOverlay = document.querySelector(".modal-overlay:not([hidden])");
       const inatOnly = !!openOverlay && openOverlay.id === "inatModal" &&
         !document.querySelector(".modal-overlay:not([hidden]):not(#inatModal)");
       const celebration = !$("congratsOverlay").hidden || ($("inatCelebrate") && !$("inatCelebrate").hidden);
-      if ((openOverlay && !inatOnly) || celebration) return;
+      const blocked = (openOverlay && !inatOnly) || celebration;
+
+      // Alt/Option shortcuts run first — before the "focus the search box"
+      // early-return below — so they fire even while you're typing a species
+      // name. AltGr (Ctrl+Alt, used for @ { } … on some layouts) is excluded
+      // so it can't hijack real text entry in the search box.
+      if (e.altKey && !e.ctrlKey && !e.metaKey && !blocked) {
+        if (altShortcut(e.code)) { e.preventDefault(); return; }
+      }
+
+      const tag = (e.target.tagName || "").toLowerCase();
+      if (tag === "input" || tag === "textarea" || e.target.isContentEditable) return;
+      if (blocked) return;
       const k = e.key;
       // Typing a letter with nothing focused starts a taxon search instead
       // of a stray single-letter shortcut — a species name is what you're
-      // almost always about to type. Rotate/undo/etc. stay one click away
-      // as buttons; digits and navigation keys are left alone below since
-      // taxon names don't start with those.
+      // almost always about to type. Action shortcuts live on Alt+letter
+      // (above); digits and navigation keys are left alone below since taxon
+      // names don't start with those.
       if (/^[a-zA-Z]$/.test(k) && !e.metaKey && !e.ctrlKey && !e.altKey) {
         if (!inatOnly) $("taxonInput").focus();
         return;
@@ -3923,8 +4329,12 @@
     S.perSpeciesFolders = LS.get("perSpeciesFolders", false);
     S.disabledAttrCols = new Set(LS.get("disabledAttrCols", []));
     S.lastApproxLocation = LS.get("lastApproxLocation", null);
+    S.sticky = LS.get("sticky", false);
+    const savedTags = LS.get("charTagList", null);
+    S.charTagList = Array.isArray(savedTags) ? savedTags.filter((t) => typeof t === "string" && t.trim()) : [...CHAR_TAGS_DEFAULT];
     CFG.suggestionWindowMin = LS.get("windowMin", CFG.suggestionWindowMin);
     CFG.cameraClockOffsetHours = LS.get("clockOffset", CFG.cameraClockOffsetHours);
+    CFG.burstGapSec = LS.get("burstGapSec", CFG.burstGapSec);
   }
 
   // Show/hide the on-photo info overlay (filename, status, date, time,
@@ -3953,6 +4363,7 @@
     await idb.open();
     restore();
     applyInfoVisibility();
+    buildCharTagsRow();
     wireButtons(); wireDropzone(); wireKeyboard(); setupAutocomplete(); setupZoom(); setupInatZoom();
     render();
     // Discover taxonomies. On first run, enable all bundled ones by default;

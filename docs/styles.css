@@ -356,6 +356,19 @@ kbd {
 .match-score.low { background: var(--danger-soft); color: var(--danger); }
 .match-score.unknown { background: var(--ground); color: var(--muted); }
 
+.upload-pick-list { display: flex; flex-direction: column; gap: 4px; max-height: 40vh; overflow-y: auto; }
+.upload-pick-row {
+  display: flex; align-items: center; gap: 10px; padding: 6px 8px;
+  border-radius: var(--r-sm); border: 1px solid var(--hair);
+}
+.upload-pick-row img {
+  width: 40px; height: 40px; object-fit: cover; border-radius: var(--r-sm);
+  background: var(--ground); flex: none;
+}
+.upload-pick-row .upload-pick-name { flex: 1; min-width: 0; font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.upload-pick-row .upload-pick-already { font-size: 11px; color: var(--faint); flex: none; }
+.upload-pick-row label.check { margin-top: 0; flex: none; }
+
 .fold-sec-body { padding: 6px var(--pad) 20px; display: flex; flex-direction: column; gap: 12px; }
 /* The flex `gap` above is the single source of vertical rhythm in here — zero
    out any margin a child would otherwise bring, so spacing never doubles.
@@ -546,6 +559,12 @@ select.input {
   flex: none; margin: 0 0 6px; font-size: 12px; color: var(--muted); line-height: 1.4;
 }
 .filmstrip-hint[hidden] { display: none; }
+/* First cell of a new burst gets breathing room + a hairline divider, so runs
+   of near-duplicate frames read as visual clusters. */
+.film-cell.burst-start {
+  margin-left: 14px;
+  box-shadow: -8px 0 0 -6.5px var(--hair-strong);
+}
 .bulk-bar {
   display: flex; align-items: center; gap: 8px; flex-wrap: wrap; flex: none;
   padding: 8px 12px; margin-bottom: 8px;
@@ -633,13 +652,24 @@ select.input {
    (non-modal) photo stage fills the rest of the window next to the sidebar. */
 .inat-stage {
   position: relative; overflow: hidden;
-  background: var(--ground); display: flex; align-items: center; justify-content: center;
+  background: var(--ground); display: flex; flex-direction: column;
   flex: 1 1 auto; min-width: 0;
 }
-.inat-stage img {
+/* Photo area fills the space above the thumbnail strip; the meta overlay and
+   info button position against this wrapper so they sit over the photo only. */
+.inat-stage-photo {
+  position: relative; flex: 1 1 auto; min-height: 0; overflow: hidden;
+  display: flex; align-items: center; justify-content: center;
+}
+.inat-stage-photo img {
   max-width: 100%; max-height: 100%; object-fit: contain; cursor: zoom-in;
 }
 .inat-stage .meta-overlay { font-size: 11.5px; max-height: 70%; }
+.inat-filmstrip {
+  flex: none; margin: 0; padding: 6px 8px;
+  background: var(--surface); border-top: 1px solid var(--hair);
+}
+.inat-filmstrip[hidden] { display: none; }
 .inat-info-btn {
   position: absolute; top: 8px; right: 8px; z-index: 4;
   width: 30px; height: 30px; border-radius: 999px; padding: 0;
@@ -724,6 +754,42 @@ select.input {
 .tag:empty { display: none; }
 .settings-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-top: 10px; }
 .settings-grid label { display: flex; flex-direction: column; gap: 6px; font-size: 12px; color: var(--muted); }
+
+/* ---------- burst mode toggle ---------- */
+.sticky-check { margin-top: 8px; }
+.sticky-check span { transition: color .12s ease; }
+body.sticky-on .sticky-check { color: var(--accent-strong); font-weight: 550; }
+body.sticky-on .sticky-check input { accent-color: var(--accent); }
+
+/* ---------- characteristics editor (Setup) ---------- */
+.tag-editor { display: flex; flex-direction: column; gap: 6px; margin-top: 8px; }
+.tag-row { display: flex; align-items: center; gap: 6px; }
+.tag-row .input { flex: 1 1 auto; }
+.tag-mini {
+  flex: none; width: 30px; height: 30px; padding: 0; font-size: 15px; line-height: 1;
+  display: inline-flex; align-items: center; justify-content: center;
+  border: 1px solid var(--hair-strong); border-radius: var(--r-sm);
+  background: var(--surface); color: var(--muted); cursor: pointer;
+  transition: border-color .12s ease, color .12s ease, background .12s ease;
+}
+.tag-mini:hover { border-color: var(--accent-line); color: var(--ink); }
+.tag-del:hover { border-color: var(--danger); color: var(--danger); }
+
+/* ---------- shortcuts cheat-sheet ---------- */
+.shortcuts-list { display: grid; grid-template-columns: 1fr 1fr; gap: 10px 26px; }
+@media (max-width: 560px) { .shortcuts-list { grid-template-columns: 1fr; } }
+.shortcuts-group { break-inside: avoid; }
+.shortcuts-group-title {
+  font-size: 11px; font-weight: 650; letter-spacing: 0.05em; text-transform: uppercase;
+  color: var(--accent-strong); margin: 4px 0 7px; padding-bottom: 4px;
+  border-bottom: 1px solid var(--hair);
+}
+.shortcuts-row { display: flex; align-items: baseline; gap: 10px; padding: 3px 0; }
+.shortcuts-row kbd {
+  flex: none; min-width: 84px; text-align: center; margin: 0;
+  font-size: 11px; padding: 3px 7px;
+}
+.shortcuts-label { font-size: 13px; color: var(--muted); line-height: 1.35; }
 
 /* ---------- drop overlay ---------- */
 #dropHint {

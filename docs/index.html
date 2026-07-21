@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>tagit — caption plant &amp; animal photos in your browser</title>
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Cpath d='M25 6C13 6 7 13 7 22c0 1 0 2 .3 3C10 18 16 14 22 12c-5 3-9 7-11 14 10 1 16-6 16-16 0-2 0-3-2-4z' fill='%232f6b47'/%3E%3C/svg%3E">
-  <link rel="stylesheet" href="styles.css?v=21">
+  <link rel="stylesheet" href="styles.css?v=23">
   <link rel="stylesheet" href="vendor/leaflet.css">
   <script>
     // Set theme before first paint to avoid a flash.
@@ -94,12 +94,14 @@
           <label class="field-label" for="inatCaptionBox">Caption to save</label>
           <input id="inatCaptionBox" class="input mono" placeholder="Taxon (Family)">
           <button id="inatSaveBtn" class="btn btn-primary full">Save &amp; next</button>
-          <label class="field-label" for="inatGeo">On iNaturalist, share coordinates as</label>
+          <label class="field-label" for="inatGeo">Coordinates on iNaturalist</label>
           <select id="inatGeo" class="input">
             <option value="open">Open — exact coordinates public</option>
             <option value="obscured">Obscured — location shown coarsely</option>
-            <option value="private">Private — location hidden from everyone</option>
+            <option value="private">Private — kept, but hidden from everyone</option>
+            <option value="none">Don't attach — no location at all</option>
           </select>
+          <p id="inatGroupNote" class="hint" style="margin:0" hidden></p>
           <button id="inatObsBtn" class="btn btn-inat full">Post observation to iNaturalist</button>
           <button id="inatSyncBtn" class="btn full">Sync IDs from iNat</button>
           <div id="inatHint" class="hint"></div>
@@ -118,11 +120,17 @@
           <label class="check"><input type="checkbox" id="inatRemember"><span>Remember token on this computer — otherwise it's kept only until the browser closes</span></label>
         </div>
         <div class="inat-stage">
-          <img id="inatPhotoImg" alt="Current photo">
-          <button type="button" id="inatInfoToggleBtn" class="inat-info-btn" title="Show/hide photo info" aria-label="Toggle photo info" aria-pressed="true">
-            <svg viewBox="0 0 24 24" class="ic" aria-hidden="true"><circle cx="12" cy="12" r="9" fill="none" stroke="currentColor" stroke-width="1.7"/><path d="M12 11v5.5" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"/><circle cx="12" cy="7.8" r="1.15" fill="currentColor"/></svg>
-          </button>
-          <div id="inatPhotoMeta" class="meta-overlay" hidden></div>
+          <div class="inat-stage-photo">
+            <img id="inatPhotoImg" alt="Current photo">
+            <button type="button" id="inatInfoToggleBtn" class="inat-info-btn" title="Show/hide photo info" aria-label="Toggle photo info" aria-pressed="true">
+              <svg viewBox="0 0 24 24" class="ic" aria-hidden="true"><circle cx="12" cy="12" r="9" fill="none" stroke="currentColor" stroke-width="1.7"/><path d="M12 11v5.5" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"/><circle cx="12" cy="7.8" r="1.15" fill="currentColor"/></svg>
+            </button>
+            <div id="inatPhotoMeta" class="meta-overlay" hidden></div>
+          </div>
+          <!-- Thumbnail strip inside the iNaturalist view: click a thumbnail
+               to view it here; tick its corner ✓ to group several photos into
+               one observation without leaving this tab. -->
+          <div id="inatFilmstrip" class="filmstrip inat-filmstrip" hidden></div>
         </div>
       </div>
     </div>
@@ -173,6 +181,25 @@
     </div>
   </div>
 
+  <div id="inatGroupUploadModal" class="modal-overlay" hidden>
+    <div class="modal-card modal-card-wide" role="dialog" aria-modal="true" aria-labelledby="groupUploadTitle">
+      <div class="modal-header">
+        <h3 id="groupUploadTitle">Post one observation</h3>
+        <button type="button" class="modal-close" data-close="inatGroupUploadModal" aria-label="Close">×</button>
+      </div>
+      <div class="fold-sec-body">
+        <p id="groupUploadNote" class="hint"></p>
+        <p class="hint">Every photo below gets linked to the same observation locally. Uncheck a photo to skip uploading its image (e.g. a near-duplicate shot) — it still gets tagged with the observation's link.</p>
+        <div id="groupUploadList" class="upload-pick-list"></div>
+        <div class="grid2">
+          <button id="groupUploadAllBtn" class="btn btn-ghost">Select all</button>
+          <button id="groupUploadNoneBtn" class="btn btn-ghost">Select none</button>
+        </div>
+        <button id="groupUploadConfirmBtn" class="btn btn-inat full">Post observation</button>
+      </div>
+    </div>
+  </div>
+
   <div id="navModal" class="modal-overlay" hidden>
     <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="navModalTitle">
       <div class="modal-header">
@@ -189,6 +216,7 @@
           <button id="rotateBtn" class="btn">Rotate 90°</button>
           <button id="undoBtn" class="btn">Undo</button>
         </div>
+        <button id="nextUntouchedBtn" class="btn full">Jump to next untouched <span class="sub">⌥J</span></button>
         <button id="undetBtn" class="btn full">Not a taxon <span class="sub">→ _nontaxa</span></button>
         <button id="deleteBtn" class="btn btn-danger full">Delete <span class="sub">→ _deleted</span></button>
 
@@ -329,11 +357,21 @@
         <label class="check"><input type="checkbox" id="perSpeciesFolders"><span>Sort tagged photos into one folder per species (within <code>_tagged</code>)</span></label>
         <p class="hint" style="margin:6px 0 0">Off by default — everything saved as tagged goes straight into <code>_tagged</code>. Turn this on to instead get <code>_tagged/Genus species/</code> subfolders, one per taxon. Applies to photos saved from now on; existing files aren't reorganized.</p>
 
+        <h4>Characteristics</h4>
+        <p class="hint">The quick tags under the species search. Rename, reorder, add your own, or remove — each is written as a plain keyword when you tick it.</p>
+        <div id="charTagEditor" class="tag-editor"></div>
+        <div class="grid2" style="margin-top:8px">
+          <button id="charTagAddBtn" class="btn btn-ghost">+ Add characteristic</button>
+          <button id="charTagResetBtn" class="btn btn-ghost">Restore defaults</button>
+        </div>
+
         <h4>Settings</h4>
         <div class="settings-grid">
           <label>Suggestion window (± min)<input type="number" id="windowMin" class="input small" min="0" step="1"></label>
           <label>Camera clock offset (h)<input type="number" id="clockOffset" class="input small" step="0.5"></label>
+          <label>Burst gap (sec)<input type="number" id="burstGap" class="input small" min="0" step="1"></label>
         </div>
+        <p class="hint" style="margin:6px 0 0">Photos taken within this many seconds of each other are treated as one burst (likely the same specimen) — shown as a cluster in the thumbnail strip, and ⌥-clickable to select together.</p>
 
         <h4>Watermark</h4>
         <label class="check"><input type="checkbox" id="wmEnable"><span>Burn a watermark into saved photos</span></label>
@@ -388,9 +426,23 @@
           <li><strong>Characteristics</strong>: tick any that apply — Dormant, Flowering, Fruiting, Detail, Habitat — each becomes a plain, visible keyword on the photo. Any number can be checked at once, and they're applied together with the caption when you save.</li>
           <li><strong>iNaturalist</strong>: paste a token in the iNaturalist tab, then click <em>Identify with iNaturalist</em> to get AI suggestions (with confidence %) for the current photo (uses its GPS &amp; date).</li>
           <li><strong>Map</strong>: photos with GPS get a <em>Show map</em> control in the photo info; it appears as a small preview in the photo's bottom-right corner — click it to enlarge.</li>
-          <li>Keys: ← → navigate · 1–5 rate · 6–9 pick a suggestion · Delete discard (only with nothing selected). Just start typing a letter anywhere to jump into the search box — Rotate/Undo/Not-a-taxon/Same-as-previous are one click away as buttons instead of shortcut letters, so a letter key always means “start a search.”</li>
+          <li>Keys: ← → navigate · 1–5 rate · 0 clear rating · 6–9 pick a suggestion · Delete discard (only with nothing selected). Just start typing a letter anywhere to jump into the search box, so a plain letter always means “start a search.”</li>
+          <li>Action shortcuts use <strong>Alt/⌥ + letter</strong> (they work even while typing in the search box): <strong>⌥R</strong> rotate · <strong>⌥U</strong> undo · <strong>⌥N</strong> not a taxon · <strong>⌥S</strong> same as previous · <strong>⌥D</strong> delete · <strong>⌥C</strong> toggle cf. · <strong>⌥I</strong> photo info · <strong>⌥J</strong> jump to next untouched · <strong>⌥B</strong> burst mode. Press <strong>?</strong> any time for the full list.</li>
           <li>In the search box, type an abbreviation of each word — e.g. <code>dro rot</code> for <em>Drosera rotundifolia</em>, <code>dact fuch</code> for <em>Dactylorhiza maculata</em> subsp. <em>fuchsii</em> — then press <strong>Enter</strong> to save that match and move to the next photo in one step. Clicking a suggestion/recently-used chip instead just adds it to the current determination without saving.</li>
         </ul>
+      </div>
+    </div>
+  </div>
+
+  <div id="shortcutsModal" class="modal-overlay" hidden>
+    <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="shortcutsTitle">
+      <div class="modal-header">
+        <h3 id="shortcutsTitle">Keyboard shortcuts</h3>
+        <button type="button" class="modal-close" data-close="shortcutsModal" aria-label="Close">×</button>
+      </div>
+      <div class="fold-sec-body">
+        <div id="shortcutsList" class="shortcuts-list"></div>
+        <p class="hint" style="margin:12px 0 0">Press <kbd>?</kbd> any time to open or close this.</p>
       </div>
     </div>
   </div>
@@ -477,6 +529,9 @@
           Save &amp; next
         </button>
         <button id="copyLastBtn" class="btn btn-ghost full">Same as previous</button>
+        <label class="check sticky-check" title="Keep the same determination loaded after each save — ideal for a run of frames of one specimen">
+          <input type="checkbox" id="stickyBox"><span>Burst mode — keep determination for the next photos</span>
+        </label>
       </div>
 
      <div class="panel-scroll">
@@ -544,7 +599,7 @@
   </main>
 
   <script src="metadata.js?v=13"></script>
-  <script src="app.js?v=31"></script>
+  <script src="app.js?v=36"></script>
   <script>
     (() => {
       const root = document.documentElement;
